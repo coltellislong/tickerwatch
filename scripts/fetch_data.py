@@ -140,6 +140,10 @@ def technicals(close: pd.Series, volume: pd.Series | None) -> dict:
         # Typical daily move over the last month, in percent.
         "vol20": rnd(close.pct_change().tail(20).std() * 100),
     }
+    weekly = close.resample("W-FRI").last().dropna()
+    if len(weekly) >= 35:
+        macd = weekly.ewm(span=12, adjust=False).mean() - weekly.ewm(span=26, adjust=False).mean()
+        t["macdW"] = rnd(float((macd - macd.ewm(span=9, adjust=False).mean()).iloc[-1]), 4)
     t["offHigh"] = rnd((1 - last / t["high52"]) * 100) if t["high52"] else None
     if volume is not None:
         v = volume.reindex(close.index).fillna(0)

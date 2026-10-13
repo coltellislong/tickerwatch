@@ -22,28 +22,32 @@
     </div>
 
     <section class="filters" aria-label="Filters">
+      <label>Horizon
+        <select id="f-horizon">
+          <option value="long" selected>Long-term (3–10 yrs)</option>
+          <option value="short">Short-term setups</option>
+        </select>
+      </label>
       <label>Rank by
         <select id="f-metric">
-          <option value="score">Growth score (blended)</option>
+          <option value="lts" selected>Long-term score</option>
+          <option value="ltq">Business quality</option>
+          <option value="ltv">Value at today's price</option>
+          <option value="mos">Margin of safety</option>
+          <option value="score">Momentum score</option>
           <option value="r1w">1 week</option>
           <option value="r1m">1 month</option>
           <option value="r3m">3 months</option>
           <option value="r6m">6 months</option>
           <option value="rytd">Year to date</option>
-          <option value="r1y" selected>1 year</option>
+          <option value="r1y">1 year</option>
         </select>
       </label>
       <label>Sector
         <select id="f-sector"><option value="">All sectors</option></select>
       </label>
       <label>Signal
-        <select id="f-setup">
-          <option value="">All stocks</option>
-          <option value="buy">Setups for next open</option>
-          <option value="breakout">Breakouts</option>
-          <option value="dip">Buy the dip</option>
-          <option value="hot">Too hot (avoid chasing)</option>
-        </select>
+        <select id="f-setup"></select>
       </label>
       <label>Market cap
         <select id="f-cap">
@@ -83,7 +87,7 @@
     <section class="card">
       <div class="table-head">
         <h2 id="table-title">Leaders</h2>
-        <p class="hint">Green rows match a setup for the next market open · hover or tap “Why?” for the plain-English reason · click a row to open it on Yahoo Finance</p>
+        <p class="hint">Green rows are buy signals · hover or tap “Why?” for the plain-English reason · click a row to open it on Yahoo Finance</p>
       </div>
       <div class="table-wrap">
         <table id="table">
@@ -94,7 +98,10 @@
     </section>
 
     <footer class="foot">
-      Prices from Yahoo Finance, listings from Nasdaq. Growth score = average percentile rank of 1M, 3M, 6M and 1Y returns (0–100).
+      Prices from Yahoo Finance, listings from Nasdaq, financial statements from SEC filings.
+      <b>Long-term score</b> (0–100) = financial quality 25 + growth 20 + valuation 20 + competitive strength 15 + risk 10 + trend 10. Metrics without free data (analyst forecasts, moat and governance reviews) are left out and the rest re-weighted.
+      <b>Buy review</b> = score ≥ 85, valuation ≥ 14/20, price ≥ 20% below the DCF fair value, no red flags. <b>Watchlist</b> = score ≥ 75. <b>Risk review</b> = a red flag such as weak interest coverage, heavy dilution or shrinking revenue.
+      Momentum score = average percentile rank of 1M, 3M, 6M and 1Y returns (0–100).
       Signals: <b>Breakout</b> = uptrend (price above its 50-day average, which is above its 200-day), within 3% of its 1-year high, RSI 55–75, trading 1.2× normal volume.
       <b>Buy the dip</b> = growth score ≥ 80 and long-term uptrend, down 2–10% this week, RSI 35–50.
       <b>Too hot</b> = RSI ≥ 80 or up 60%+ in a month. Only stocks priced ≥ $5 trading ≥ $5M a day qualify.

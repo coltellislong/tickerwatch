@@ -2,12 +2,18 @@ name: Update stock data
 
 on:
   schedule:
-    - cron: "37 21 * * 1-5"   # weekdays ~5:37pm ET, after the US close
+    - cron: "37 21 * * 1-5"   # weekdays ~5:37pm ET, after the US close: prices + scores
+    - cron: "17 13 * * 6"     # Saturdays: also refresh SEC financial statements
   workflow_dispatch:
+    inputs:
+      fundamentals:
+        description: "Also refresh SEC financial statements"
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths:
-      - "scripts/fetch_data.py"
+      - "scripts/**"
       - "requirements.txt"
       - ".github/workflows/update-data.yml"
 
@@ -21,7 +27,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       # Always refresh main, which GitHub Pages serves, whichever branch triggered the run.
       - uses: actions/checkout@v4
@@ -33,11 +39,19 @@ jobs:
           cache: pip
       - run: pip install -r requirements.txt
       - run: python scripts/fetch_data.py
+      - name: Refresh SEC financial statements
+        if: >-
+          github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' && inputs.fundamentals) ||
+          github.event.schedule == '17 13 * * 6' ||
+          hashFiles('data/fundamentals.json') == ''
+        run: python scripts/fetch_fundamentals.py
+      - run: python scripts/score.py
       - name: Commit data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/stocks.json
+          git add data/stocks.json data/fundamentals.json 2>/dev/null || git add data/stocks.json
           git diff --cached --quiet || git commit -m "Update stock data $(date -u +%Y-%m-%d)"
           git pull --rebase origin main
           git push origin HEAD:main

@@ -2,7 +2,11 @@
   "use strict";
 
   const METRICS = {
-    score: { label: "Growth score", short: "Score", pct: false },
+    lts: { label: "Long-term score", short: "LT score", pct: false },
+    ltq: { label: "Business quality", short: "Quality", pct: false },
+    ltv: { label: "Value at today's price", short: "Value", pct: false },
+    mos: { label: "Margin of safety", short: "MoS", pct: true },
+    score: { label: "Momentum score", short: "Momentum", pct: false },
     r1w: { label: "1-week return", short: "1W", pct: true },
     r1m: { label: "1-month return", short: "1M", pct: true },
     r3m: { label: "3-month return", short: "3M", pct: true },
@@ -19,13 +23,17 @@
     { key: "sector", label: "Sector", cls: "l" },
     { key: "marketCap", label: "Mkt cap", fmt: (v) => fmtCap(v) },
     { key: "price", label: "Price", fmt: (v) => "$" + fmtNum(v, 2) },
-    ...["r1w", "r1m", "r3m", "r6m", "rytd", "r1y"].map((k) => ({ key: k, label: METRICS[k].short, ret: true })),
-    { key: "score", label: "Score", fmt: (v) => fmtNum(v, 0) },
+    { key: "lts", label: "LT score", fmt: (v) => fmtNum(v, 0), only: "long" },
+    { key: "ltq", label: "Quality", fmt: (v) => fmtNum(v, 0), only: "long" },
+    { key: "ltv", label: "Value", fmt: (v) => fmtNum(v, 0), only: "long" },
+    { key: "mos", label: "MoS", ret: true, only: "long" },
+    ...["r1w", "r1m", "r3m", "r6m", "rytd", "r1y"].map((k) => ({ key: k, label: METRICS[k].short, ret: true, only: k === "r1w" || k === "r6m" ? "short" : null })),
+    { key: "score", label: "Momentum", fmt: (v) => fmtNum(v, 0) },
     { key: "spark", label: "1Y trend", sortable: false },
   ];
 
   const $ = (id) => document.getElementById(id);
-  const state = { data: null, metric: "r1y", sector: "", cap: 0, limit: 50, q: "", sortKey: null, sortDir: -1, setup: "" };
+  const state = { data: null, horizon: "long", metric: "lts", sector: "", cap: 0, limit: 50, q: "", sortKey: null, sortDir: -1, setup: "" };
 
   // ---------- formatting ----------
   function fmtNum(v, d) {
@@ -141,12 +149,119 @@
     return null;
   }
 
+  // ---------- long-term signals (scored in scripts/score.py) ----------
+  const LT_SIGNALS = {
+    buy: { label: "Buy review", tone: "buy" },
+    watch: { label: "Watchlist", tone: "neutral" },
+    hold: { label: "Hold / fair", tone: "neutral" },
+    trim: { label: "Trim review", tone: "warn" },
+    avoid: { label: "Avoid", tone: "muted" },
+    risk: { label: "Risk review", tone: "risk" },
+  };
+  const LT_CATS = [
+    ["A", "Quality"], ["B", "Growth"], ["C", "Valuation"],
+    ["D", "Moat"], ["E", "Risk"], ["F", "Trend"],
+  ];
+  function ltClass(v) {
+    return v >= 90 ? "Exceptional" : v >= 80 ? "Strong" : v >= 70 ? "Attractive" : v >= 60 ? "Fair" : v >= 50 ? "Weak" : "Unattractive";
+  }
+  // The signal shown for a stock under the current horizon.
+  function sigOf(s) {
+    if (state.horizon === "short") {
+      return s.setup ? { kind: s.setup.kind, label: SETUP_LABELS[s.setup.kind], tone: s.setup.kind === "hot" ? "warn" : "buy" } : null;
+    }
+    const k = s.lt && s.lt.signal;
+    return k && LT_SIGNALS[k] ? { kind: k, ...LT_SIGNALS[k] } : null;
+  }
+  // Plain-language reading of a 0-100 sub-score.
+  const grade = (v) => (v == null ? "not enough data" : v >= 80 ? "great" : v >= 65 ? "good" : v >= 50 ? "so-so" : "weak");
+
+  function ltExplain(s) {
+    const lt = s.lt;
+    const sig = LT_SIGNALS[lt.signal];
+    const metric = (id) => lt.m.find((m) => m[0] === id);
+    const best = lt.m.filter((m) => m[2] != null && m[2] === m[3] && m[1] !== "F").slice(0, 2).map((m) => m[4]);
+    const worst = lt.m.filter((m) => m[2] === 0 && m[1] !== "F").slice(0, 2).map((m) => m[4]);
+    const fv = lt.fv;
+    const price = s.price;
+
+    const business = `Buying a stock is like buying part of a lemonade stand. This stand looks <b>${grade(lt.quality)}</b> (quality ${fmtNum(lt.quality, 0)}/100).` +
+      (best.length ? ` Good signs: ${best.map(esc).join("; ")}.` : "") +
+      (worst.length ? ` Weak spots: ${worst.map(esc).join("; ")}.` : "");
+    let pricePara;
+    if (fv) {
+      const cheap = lt.mos >= 0;
+      pricePara = `Adding up the cash it should make in future, it's worth about <b>$${fmtNum(fv[1], 2)}</b> a share ($${fmtNum(fv[0], 2)} if things go badly, $${fmtNum(fv[2], 2)} if great). ` +
+        `Today's $${fmtNum(price, 2)} is ${cheap ? `<b>${fmtNum(lt.mos, 0)}% below</b>` : `<b>${fmtNum(-lt.mos, 0)}% above</b>`} that. ` +
+        (cheap ? "Paying less than it's worth gives you a cushion if you're wrong." : "The price already assumes a lot of good news.");
+    } else {
+      pricePara = "There isn't enough steady cash flow to estimate a fair value, so treat the price with extra caution.";
+    }
+    pricePara += ` Value score: ${fmtNum(lt.value, 0)}/100.`;
+    const trendBits = ["above200", "golden", "relStr"].map(metric).filter(Boolean);
+    const trendUp = trendBits.filter((m) => m[2] === m[3]).length;
+    const timing = `The price trend is <b>${trendUp >= 2 ? "pointing up" : trendUp === 1 ? "mixed" : "pointing down"}</b> (${trendBits.map((m) => esc(m[4])).join("; ")}). ` +
+      "For a long-term owner this matters least; a dip can be a chance to buy a good business cheaper.";
+
+    let plan;
+    if (lt.signal === "buy") {
+      plan = `Passes every buy check (score ≥ 85, valuation ≥ 14/20, ≥ 20% below fair value). A <b>3–10 year</b> idea: start small (2–3% of your portfolio), add while the business keeps performing, and don't sell just because the price drops.`;
+    } else if (lt.signal === "watch") {
+      const why = [];
+      if (lt.score < 85) why.push(`the score is ${fmtNum(lt.score, 0)} (a buy needs 85)`);
+      if (lt.cats.C[1] && lt.cats.C[0] / lt.cats.C[1] < 0.7) why.push("the valuation checks aren't strong enough");
+      if (lt.mos == null || lt.mos < 20) why.push("the price isn't 20% below fair value yet");
+      plan = `A good business to keep an eye on, but not a buy today because ${why.join(" and ") || "it narrowly misses a buy check"}.` +
+        (lt.entry && lt.entry < price ? ` A more attractive entry would be around <b>$${fmtNum(lt.entry, 2)}</b> or lower.` : "");
+    } else if (lt.signal === "hold") {
+      plan = "A fair business at a fair-ish price. If you already own it and nothing has broken, holding is reasonable. Not a priority for new money.";
+    } else if (lt.signal === "trim") {
+      plan = `Decent business, but the price is far above the fair-value estimate. If you own a lot of it, consider trimming back toward your normal position size. That's a review, not an automatic sale: think about taxes and whether the story has really changed.`;
+    } else if (lt.signal === "risk") {
+      plan = `Blocked from any buy signal by a red flag: ${lt.flags.map(esc).join("; ")}. If you own it, check whether the reason you bought it still holds.`;
+    } else {
+      plan = "The numbers don't make a strong case right now. Avoid new buying until the business or the price improves.";
+    }
+    const changes = [];
+    if (lt.signal === "buy" || lt.signal === "watch" || lt.signal === "hold") {
+      changes.push("revenue growth slowing below 5% a year", "returns on capital falling below 10%", "debt climbing above 3× EBITDA");
+      if (fv) changes.push(`the price rising above $${fmtNum(fv[1], 2)} (no more discount)`);
+    } else if (lt.signal === "risk") {
+      changes.push("the red flags clearing in the next annual report");
+    } else {
+      changes.push("stronger profits or cash flow in the next annual report", fv ? `the price falling toward $${fmtNum(lt.entry, 2)}` : "positive free cash flow");
+    }
+
+    const bars = LT_CATS.map(([k, name]) => {
+      const [earned, avail, mx] = lt.cats[k];
+      const w = avail ? Math.round((earned / avail) * 100) : 0;
+      return `<div class="cat"><span>${name}</span><span class="cat-bar"><i style="width:${w}%"></i></span><span class="cat-v">${avail ? `${fmtNum(earned, 1)}/${avail}` : "n/a"}</span></div>`;
+    }).join("");
+
+    return `
+      <div class="ex-head"><span class="badge ${lt.signal}">${sig.label}</span><b>${esc(s.symbol)}</b><span class="ex-name">${esc(s.name)}</span></div>
+      <div class="ex-score"><b>${fmtNum(lt.score, 0)}</b><span>/100 · ${ltClass(lt.score)}</span></div>
+      <div class="cats">${bars}</div>
+      <p class="ex-k">1. Is it a good business?</p><p>${business}</p>
+      <p class="ex-k">2. Is it a good price?</p><p>${pricePara}</p>
+      <p class="ex-k">3. Is now a good time?</p><p>${timing}</p>
+      <p class="ex-k">What to do</p><p>${plan}</p>
+      <p class="ex-k">What would change this</p><p>${changes.map(esc).join("; ")}.</p>
+      <p class="ex-note">Based on SEC filings through fiscal year ending ${esc(lt.fy)} and prices from ${esc(state.data.asOf)}. ${lt.cov}% of the model's points could be measured; analyst forecasts and judgment calls like moat and management aren't included. The score ranks stocks; a 90 does not mean a 90% chance of making money. Not financial advice.</p>`;
+  }
+
   const explainBox = $("explain");
   let explainFor = null;
   let explainOpenedAt = 0;
   function showExplain(btn) {
     const s = state.data.stocks.find((x) => x.symbol === btn.dataset.sym);
-    if (!s || !s.setup) return;
+    if (!s) return;
+    if (state.horizon === "long") {
+      if (!s.lt || !s.lt.signal || s.lt.signal === "nodata") return;
+      explainBox.innerHTML = ltExplain(s);
+      return openExplain(btn);
+    }
+    if (!s.setup) return;
     const u = s.setup;
     const buy = u.kind !== "hot";
     explainBox.innerHTML = `
@@ -156,14 +271,18 @@
       <p class="ex-k">${buy ? "How long to stay in" : "What to do"}</p><p>${esc(u.hold)}</p>
       ${u.exit ? `<p class="ex-k">When to leave</p><p>${esc(u.exit)}</p>` : ""}
       <p class="ex-note">A simple rule applied to the ${esc(state.data.asOf)} closing prices, not a prediction or financial advice. Prices can jump or drop at the open. Only invest money you can afford to lose.</p>`;
+    openExplain(btn);
+  }
+  function openExplain(btn) {
     explainBox.hidden = false;
     explainFor = btn;
     explainOpenedAt = Date.now();
     btn.setAttribute("aria-expanded", "true");
     placeExplain();
   }
+  const sheet = window.matchMedia("(hover: none)");
   function placeExplain() {
-    if (!explainFor) return;
+    if (!explainFor || sheet.matches) return; // touch screens get a bottom sheet (CSS)
     const r = explainFor.getBoundingClientRect();
     const box = explainBox.getBoundingClientRect();
     let x = Math.min(r.left, window.innerWidth - box.width - 8);
@@ -184,10 +303,15 @@
     return state.data.stocks.filter(
       (s) =>
         (!state.sector || s.sector === state.sector) &&
-        (!state.setup || (state.setup === "buy" ? s.setup && s.setup.kind !== "hot" : s.setup && s.setup.kind === state.setup)) &&
+        (!state.setup || matchesSignal(s, state.setup)) &&
         s.marketCap >= state.cap &&
         (!q || s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
     );
+  }
+  function matchesSignal(s, want) {
+    const sig = sigOf(s);
+    if (!sig) return false;
+    return want === "buy" ? sig.tone === "buy" : sig.kind === want;
   }
   function byMetric(rows, key, dir = -1) {
     return rows
@@ -215,10 +339,17 @@
     } else {
       tiles.push({ label: "Score ≥ 90", value: vals.filter((v) => v >= 90).length.toLocaleString(), note: "consistently strong across windows" });
     }
-    const buys = rows.filter((s) => s.setup && s.setup.kind !== "hot");
-    const nb = buys.filter((s) => s.setup.kind === "breakout").length;
-    tiles.push({ label: "Setups for next open", value: buys.length.toLocaleString(), cls: buys.length ? "up" : "", note: `${nb} breakout · ${buys.length - nb} buy the dip` });
-    tiles.push({ label: "Top performer", value: top ? top.symbol : "—", note: top ? `${fmtMetric(m, top[m])} · ${top.name}` : "" });
+    if (state.horizon === "long") {
+      const count = (k) => rows.filter((s) => s.lt && s.lt.signal === k).length;
+      const nbuy = count("buy");
+      tiles.splice(2, 1, { label: "Scored", value: rows.filter((s) => s.lts != null).length.toLocaleString(), note: "with enough SEC filing data" });
+      tiles.push({ label: "Buy review", value: nbuy.toLocaleString(), cls: nbuy ? "up" : "", note: `${count("watch").toLocaleString()} on the watchlist · ${count("risk").toLocaleString()} risk reviews` });
+    } else {
+      const buys = rows.filter((s) => s.setup && s.setup.kind !== "hot");
+      const nb = buys.filter((s) => s.setup.kind === "breakout").length;
+      tiles.push({ label: "Setups for next open", value: buys.length.toLocaleString(), cls: buys.length ? "up" : "", note: `${nb} breakout · ${buys.length - nb} buy the dip` });
+    }
+    tiles.push({ label: state.horizon === "long" ? "Top ranked" : "Top performer", value: top ? top.symbol : "—", note: top ? `${fmtMetric(m, top[m])} · ${top.name}` : "" });
     $("tiles").innerHTML = tiles
       .map((t) => `<div class="tile"><div class="label">${esc(t.label)}</div><div class="value ${t.cls || ""}">${esc(t.value)}</div>${t.note ? `<div class="note">${esc(t.note)}</div>` : ""}</div>`)
       .join("");
@@ -310,7 +441,17 @@
     return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline class="spark${neg ? " neg" : ""}" points="${pts}"/></svg>`;
   }
 
+  function syncSignalOptions() {
+    const opts = state.horizon === "long"
+      ? [["", "All stocks"], ["buy", "Buy review"], ["watch", "Watchlist"], ["hold", "Hold / fair"], ["trim", "Trim review"], ["avoid", "Avoid"], ["risk", "Risk review"]]
+      : [["", "All stocks"], ["buy", "Setups for next open"], ["breakout", "Breakouts"], ["dip", "Buy the dip"], ["hot", "Too hot (avoid chasing)"]];
+    $("f-setup").innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+    $("f-setup").value = state.setup;
+  }
+  const visibleColumns = () => COLUMNS.filter((c) => !c.only || c.only === state.horizon);
+
   function renderTable(rows) {
+    const COLUMNS = visibleColumns();
     const key = state.sortKey || state.metric;
     const dir = state.sortKey ? state.sortDir : -1;
     let sorted = byMetric(rows, key, dir);
@@ -327,9 +468,10 @@
           if (c.key === "rank") return `<td class="na">${i + 1}</td>`;
           if (c.key === "spark") return `<td>${sparkline(s.spark)}</td>`;
           if (c.key === "setup") {
-            if (!s.setup) return `<td class="l"></td>`;
-            const k = s.setup.kind;
-            return `<td class="l"><span class="sig"><span class="badge ${k}">${SETUP_LABELS[k]}</span><button type="button" class="why" data-sym="${esc(s.symbol)}" aria-expanded="false" aria-controls="explain">Why?</button></span></td>`;
+            const sig = sigOf(s);
+            if (!sig) return `<td class="l"></td>`;
+            const k = sig.kind;
+            return `<td class="l"><span class="sig"><span class="badge ${k}">${sig.label}</span><button type="button" class="why" data-sym="${esc(s.symbol)}" aria-expanded="false" aria-controls="explain">Why?</button></span></td>`;
           }
           const v = s[c.key];
           if (c.ret) return `<td class="${retClass(v)}">${fmtPct(v)}</td>`;
@@ -337,7 +479,8 @@
           const text = c.fmt ? c.fmt(v) : v == null ? "—" : v;
           return `<td class="${c.cls || ""}"${c.key === "name" ? ` title="${esc(v)}"` : ""}>${esc(text)}</td>`;
         }).join("");
-        const hl = s.setup ? (s.setup.kind === "hot" ? " setup-hot" : " setup-buy") : "";
+        const sig = sigOf(s);
+        const hl = sig ? (sig.tone === "buy" ? " setup-buy" : sig.tone === "warn" ? " setup-hot" : "") : "";
         return `<tr class="${hl.trim()}" data-sym="${esc(s.symbol)}">${cells}</tr>`;
       })
       .join("");
@@ -375,13 +518,33 @@
     const tbody = $("table").querySelector("tbody");
     // Hover or focus opens the explanation; a tap toggles it on touch screens.
     tbody.addEventListener("mouseover", (e) => { const b = e.target.closest(".why"); if (b && b !== explainFor) showExplain(b); });
-    tbody.addEventListener("mouseout", (e) => { const b = e.target.closest(".why"); if (b && !b.contains(e.relatedTarget)) hideExplain(); });
+    tbody.addEventListener("mouseout", (e) => {
+      // Touch screens fire a synthetic mouseout when the sheet opens under the finger.
+      if (sheet.matches) return;
+      const b = e.target.closest(".why");
+      if (b && !b.contains(e.relatedTarget)) hideExplain();
+    });
     tbody.addEventListener("focusin", (e) => { const b = e.target.closest(".why"); if (b) showExplain(b); });
     tbody.addEventListener("focusout", (e) => { if (e.target.closest(".why")) hideExplain(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideExplain(); });
-    document.addEventListener("click", (e) => { if (!e.target.closest(".why")) hideExplain(); });
+    document.addEventListener("click", (e) => {
+      // A tap's click can land on the sheet it just opened; only a later tap outside closes it.
+      if (e.target.closest(".why") || e.target.closest("#explain") || Date.now() - explainOpenedAt < 400) return;
+      hideExplain();
+    });
     window.addEventListener("scroll", placeExplain, { passive: true });
     $("f-setup").addEventListener("change", (e) => { state.setup = e.target.value; render(); });
+    $("f-horizon").addEventListener("change", (e) => {
+      state.horizon = e.target.value;
+      state.setup = "";
+      state.sortKey = null;
+      // Each horizon opens on its own headline ranking.
+      state.metric = state.horizon === "long" ? "lts" : "score";
+      $("f-metric").value = state.metric;
+      syncSignalOptions();
+      hideExplain();
+      render();
+    });
     tbody.addEventListener("click", (e) => {
       const why = e.target.closest(".why");
       // A tap fires mouseover then click; don't let the click close what the tap just opened.
@@ -409,7 +572,22 @@
       return;
     }
     const d = state.data;
-    for (const s of d.stocks) s.setup = setupFor(s);
+    for (const s of d.stocks) {
+      s.setup = setupFor(s);
+      const lt = s.lt || {};
+      s.lts = lt.score ?? null;
+      s.ltq = lt.quality ?? null;
+      s.ltv = lt.value ?? null;
+      s.mos = lt.mos ?? null;
+    }
+    if (!d.stocks.some((s) => s.lts != null)) {
+      // No fundamentals yet: start on the momentum view.
+      state.horizon = "short";
+      state.metric = "r1y";
+      $("f-horizon").value = "short";
+      $("f-metric").value = "r1y";
+    }
+    syncSignalOptions();
     $("asof").textContent = `${d.count.toLocaleString()} US stocks with market cap ≥ ${fmtCap(d.minMarketCap)} · prices as of ${d.asOf} · updated ${new Date(d.generatedAt).toLocaleString()}`;
     $("sample-banner").hidden = !d.sample;
     const sectors = [...new Set(d.stocks.map((s) => s.sector))].sort();

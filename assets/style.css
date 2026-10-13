@@ -164,10 +164,22 @@ tbody tr.setup-buy:hover { background: var(--hl-bg); filter: brightness(0.97); }
 .badge {
   display: inline-block; font-size: 11px; font-weight: 600; line-height: 1;
   padding: 4px 7px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap;
-  min-width: 78px; text-align: center;
+  min-width: 82px; text-align: center;
 }
 .badge.breakout, .badge.dip { color: var(--up-text); }
-.badge.hot { color: var(--warn-text); border-color: var(--warn-edge); }
+.badge.hot, .badge.trim { color: var(--warn-text); border-color: var(--warn-edge); }
+.badge.buy { color: var(--up-text); }
+.badge.watch, .badge.hold { color: var(--text-secondary); }
+.badge.avoid { color: var(--text-muted); }
+.badge.risk { color: var(--down-text); }
+.ex-score { display: flex; align-items: baseline; gap: 4px; margin: -2px 0 8px; }
+.ex-score b { font-size: 24px; }
+.ex-score span { color: var(--text-secondary); font-size: 12px; }
+.cats { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 14px; margin-bottom: 10px; }
+.cat { display: grid; grid-template-columns: 74px 1fr 38px; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary); }
+.cat-bar { height: 6px; border-radius: 3px; background: var(--grid); overflow: hidden; }
+.cat-bar i { display: block; height: 100%; border-radius: 3px; background: var(--series-1); }
+.cat-v { text-align: right; font-variant-numeric: tabular-nums; }
 .why {
   font: inherit; font-size: 12px; color: var(--text-primary); cursor: help;
   background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
@@ -176,7 +188,7 @@ tbody tr.setup-buy:hover { background: var(--hl-bg); filter: brightness(0.97); }
 .why:hover, .why[aria-expanded="true"] { border-color: var(--text-muted); }
 .why:focus-visible, td.sym a:focus-visible { outline: 2px solid var(--series-1); outline-offset: 2px; }
 .explain {
-  position: fixed; z-index: 11; width: min(340px, calc(100vw - 16px)); pointer-events: none;
+  position: fixed; z-index: 11; width: min(440px, calc(100vw - 16px)); pointer-events: none; max-height: calc(100vh - 16px); overflow: hidden;
   background: var(--surface-1); color: var(--text-primary);
   border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.18); font-size: 13px; line-height: 1.45; text-align: left; white-space: normal;
@@ -186,3 +198,12 @@ tbody tr.setup-buy:hover { background: var(--hl-bg); filter: brightness(0.97); }
 .ex-name { color: var(--text-secondary); font-size: 12px; }
 .explain .ex-k { margin: 0 0 2px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-muted); }
 .explain .ex-note { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--grid); font-size: 11px; color: var(--text-muted); }
+
+/* Touch screens: show the explanation as a scrollable bottom sheet. */
+@media (hover: none) {
+  .explain {
+    pointer-events: auto; overflow-y: auto; overscroll-behavior: contain;
+    left: 8px !important; right: 8px; top: auto !important;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px)); width: auto; max-height: 70vh;
+  }
+}
