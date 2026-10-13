@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,8 @@ CHUNK = 200
 # Trailing windows in calendar days. YTD is handled separately.
 WINDOWS = {"r1w": 7, "r1m": 30, "r3m": 91, "r6m": 182, "r1y": 365}
 SCORE_KEYS = ["r1m", "r3m", "r6m", "r1y"]
+# Share-class boilerplate Nasdaq appends to company names.
+NAME_TAIL = re.compile(r"\s+(Common Stock|Common Shares|Ordinary Shares?|American Depositary Shares?|Class [A-C] (Common|Ordinary)).*$", re.I)
 
 
 def to_float(s: str | None) -> float | None:
@@ -81,7 +84,7 @@ def fetch_universe() -> list[dict]:
         universe[sym] = {
             "symbol": sym,
             "yahoo": sym.replace("/", "-"),
-            "name": (row.get("name") or "").replace(" Common Stock", "").strip(),
+            "name": NAME_TAIL.sub("", row.get("name") or "").strip(),
             "sector": row.get("sector") or "Other",
             "industry": row.get("industry") or "",
             "exchange": row["exchange"],
@@ -91,8 +94,9 @@ def fetch_universe() -> list[dict]:
     return stocks[:MAX_TICKERS] if MAX_TICKERS else stocks
 
 
-def download_closes(symbols: list[str], start: str) -> pd.DataFrame:
-    frames = []
+def download_prices(symbols: list[str], start: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (daily closes, daily share volume), one column per ticker."""
+    frames, vols = [], []
     for i in range(0, len(symbols), CHUNK):
         batch = symbols[i : i + CHUNK]
         print(f"prices {i + 1}-{i + len(batch)} of {len(symbols)}", file=sys.stderr)
@@ -102,11 +106,47 @@ def download_closes(symbols: list[str], start: str) -> pd.DataFrame:
         )
         if df.empty:
             continue
-        close = df["Close"]
+        close, volume = df["Close"], df["Volume"]
         if isinstance(close, pd.Series):  # single-ticker batch
-            close = close.to_frame(batch[0])
+            close, volume = close.to_frame(batch[0]), volume.to_frame(batch[0])
         frames.append(close)
-    return pd.concat(frames, axis=1) if frames else pd.DataFrame()
+        vols.append(volume)
+    if not frames:
+        return pd.DataFrame(), pd.DataFrame()
+    return pd.concat(frames, axis=1), pd.concat(vols, axis=1)
+
+
+def rsi(series: pd.Series, period: int = 14) -> float | None:
+    """Wilder's relative strength index of the latest close (0-100)."""
+    delta = series.diff().dropna()
+    if len(delta) < period * 2:
+        return None
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean().iloc[-1]
+    if loss == 0:
+        return 100.0
+    return round(float(100 - 100 / (1 + gain / loss)), 1)
+
+
+def technicals(close: pd.Series, volume: pd.Series | None) -> dict:
+    """Trend, stretch and activity stats the dashboard's setup rules read."""
+    last = float(close.iloc[-1])
+    rnd = lambda v, d=2: None if v is None or math.isnan(v) else round(float(v), d)
+    t = {
+        "sma50": rnd(close.tail(50).mean()) if len(close) >= 50 else None,
+        "sma200": rnd(close.tail(200).mean()) if len(close) >= 200 else None,
+        "high52": rnd(close.tail(252).max()),
+        "rsi14": rsi(close),
+        # Typical daily move over the last month, in percent.
+        "vol20": rnd(close.pct_change().tail(20).std() * 100),
+    }
+    t["offHigh"] = rnd((1 - last / t["high52"]) * 100) if t["high52"] else None
+    if volume is not None:
+        v = volume.reindex(close.index).fillna(0)
+        avg50 = v.tail(50).mean()
+        t["volRatio"] = rnd(v.tail(10).mean() / avg50) if avg50 else None
+        t["dollarVol"] = rnd((close.tail(20) * v.tail(20)).mean(), 0)
+    return t
 
 
 def pct(now: float, then: float | None) -> float | None:
@@ -125,8 +165,9 @@ def main() -> None:
     print(f"universe: {len(stocks)} stocks >= ${MIN_MARKET_CAP:,.0f}", file=sys.stderr)
 
     start = (datetime.now(timezone.utc) - timedelta(days=400)).strftime("%Y-%m-%d")
-    closes = download_closes([s["yahoo"] for s in stocks], start)
+    closes, volumes = download_prices([s["yahoo"] for s in stocks], start)
     closes.index = pd.to_datetime(closes.index).tz_localize(None)
+    volumes.index = closes.index
 
     out = []
     for s in stocks:
@@ -146,6 +187,8 @@ def main() -> None:
         rec["rytd"] = pct(last, close_on_or_before(series, prev_year_end)) if series.index[0] <= prev_year_end else None
         weekly = series.resample("W-FRI").last().dropna().tail(53)
         rec["spark"] = [round(float(v), 2) for v in weekly]
+        vol = volumes[s["yahoo"]] if s["yahoo"] in volumes else None
+        rec.update(technicals(series, vol))
         out.append(rec)
 
     # Growth score: mean percentile rank across 1M/3M/6M/1Y (0-100).
