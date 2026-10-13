@@ -22,7 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Always refresh main, which GitHub Pages serves, whichever branch triggered the run.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -35,5 +38,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/stocks.json
           git diff --cached --quiet || git commit -m "Update stock data $(date -u +%Y-%m-%d)"
-          git pull --rebase origin "${GITHUB_REF_NAME}"
-          git push origin "HEAD:${GITHUB_REF_NAME}"
+          git pull --rebase origin main
+          git push origin HEAD:main
