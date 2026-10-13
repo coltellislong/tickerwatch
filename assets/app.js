@@ -936,10 +936,20 @@
       const k = th.dataset.key;
       const col = COLUMNS.find((c) => c.key === k);
       if (!col || col.sortable === false) return;
-      const current = state.sortKey || state.metric;
-      if (current === k) state.sortDir = state.sortKey ? -state.sortDir : 1;
-      else state.sortDir = col.cls && col.cls.startsWith("l") ? 1 : -1;
-      state.sortKey = k;
+      // Each header cycles: first click sorts (high→low for numbers, A→Z for text),
+      // second click reverses, third click clears back to the "Rank by" ranking.
+      const natural = col.cls && col.cls.startsWith("l") ? 1 : -1;
+      if (state.sortKey === k) {
+        if (state.sortDir === natural) state.sortDir = -natural;
+        else state.sortKey = null;
+      } else if (!state.sortKey && k === state.metric) {
+        // Already the default ranking (high→low), so the first click reverses it.
+        state.sortKey = k;
+        state.sortDir = 1;
+      } else {
+        state.sortKey = k;
+        state.sortDir = natural;
+      }
       renderTable(filtered());
     };
     thead.addEventListener("click", (e) => { const th = e.target.closest("th"); if (th) sortBy(th); });
