@@ -240,6 +240,7 @@
           if (c.key === "spark") return `<td>${sparkline(s.spark)}</td>`;
           const v = s[c.key];
           if (c.ret) return `<td class="${retClass(v)}">${fmtPct(v)}</td>`;
+          if (c.key === "symbol") return `<td class="${c.cls}"><a href="${yahoo(v)}" target="_blank" rel="noopener">${esc(v)}</a></td>`;
           const text = c.fmt ? c.fmt(v) : v == null ? "—" : v;
           return `<td class="${c.cls || ""}"${c.key === "name" ? ` title="${esc(v)}"` : ""}>${esc(text)}</td>`;
         }).join("");
@@ -278,6 +279,7 @@
     thead.addEventListener("click", (e) => { const th = e.target.closest("th"); if (th) sortBy(th); });
     thead.addEventListener("keydown", (e) => { const th = e.target.closest("th"); if (th && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); sortBy(th); } });
     $("table").querySelector("tbody").addEventListener("click", (e) => {
+      if (e.target.closest("a")) return;
       const tr = e.target.closest("tr");
       if (tr) window.open(yahoo(tr.dataset.sym), "_blank", "noopener");
     });
@@ -288,9 +290,13 @@
 
   async function init() {
     try {
+      const embedded = document.getElementById("stocks-data");
+      if (embedded) state.data = JSON.parse(embedded.textContent);
+      else {
       const res = await fetch("data/stocks.json", { cache: "no-cache" });
       if (!res.ok) throw new Error(res.status + " " + res.statusText);
       state.data = await res.json();
+      }
     } catch (err) {
       $("asof").textContent = "Couldn't load data/stocks.json (" + err.message + "). Serve this folder over HTTP, e.g. python -m http.server.";
       return;
