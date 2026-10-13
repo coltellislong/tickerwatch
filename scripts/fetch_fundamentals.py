@@ -170,6 +170,9 @@ def extract(facts: dict) -> dict | None:
 
 
 def main() -> None:
+    if "@" not in HEADERS["User-Agent"]:
+        print("warning: SEC_USER_AGENT has no email address; the SEC will likely refuse the download. "
+              "Set it as a repository variable, e.g. 'Your Name you@example.com'.", file=sys.stderr)
     symbols = [s["symbol"] for s in json.loads(STOCKS.read_text())["stocks"]]
     print(f"{len(symbols)} symbols from {STOCKS.name}", file=sys.stderr)
 
