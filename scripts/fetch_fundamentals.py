@@ -33,7 +33,8 @@ OUT = ROOT / "data" / "fundamentals.json"
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_ZIP_URL = "https://www.sec.gov/Archives/edgar/daily-index/xbrl/companyfacts.zip"
 HEADERS = {
-    "User-Agent": os.environ.get("SEC_USER_AGENT", "TickerWatch research bot https://github.com/coltellislong/tickerwatch"),
+    # The SEC requires "Name email@example.com"; set the SEC_USER_AGENT repository variable.
+    "User-Agent": os.environ.get("SEC_USER_AGENT") or "TickerWatch research bot https://github.com/coltellislong/tickerwatch",
     "Accept-Encoding": "gzip, deflate",
 }
 YEARS = 6

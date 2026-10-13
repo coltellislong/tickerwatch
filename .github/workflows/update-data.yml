@@ -45,6 +45,10 @@ jobs:
           (github.event_name == 'workflow_dispatch' && inputs.fundamentals) ||
           github.event.schedule == '17 13 * * 6' ||
           hashFiles('data/fundamentals.json') == ''
+        # A failed SEC download shouldn't stop the daily price update; scoring reuses the last good file.
+        continue-on-error: true
+        env:
+          SEC_USER_AGENT: ${{ vars.SEC_USER_AGENT }}
         run: python scripts/fetch_fundamentals.py
       - run: python scripts/score.py
       - name: Commit data
