@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TickerWatch Growth</title>
+  <meta name="description" content="US stocks ranked by price growth over 1W, 1M, 3M, 6M, YTD and 1Y.">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <div class="viz-root">
+    <header class="top">
+      <div>
+        <h1>TickerWatch Growth</h1>
+        <p class="sub" id="asof">Loading…</p>
+      </div>
+    </header>
+
+    <div id="sample-banner" class="banner" hidden>
+      <strong>Sample data:</strong> these tickers and prices are made up so you can preview the layout.
+      Run <code>python scripts/fetch_data.py</code> or the “Update stock data” GitHub Action to load real market data.
+    </div>
+
+    <section class="filters" aria-label="Filters">
+      <label>Rank by
+        <select id="f-metric">
+          <option value="score">Growth score (blended)</option>
+          <option value="r1w">1 week</option>
+          <option value="r1m">1 month</option>
+          <option value="r3m">3 months</option>
+          <option value="r6m">6 months</option>
+          <option value="rytd">Year to date</option>
+          <option value="r1y" selected>1 year</option>
+        </select>
+      </label>
+      <label>Sector
+        <select id="f-sector"><option value="">All sectors</option></select>
+      </label>
+      <label>Market cap
+        <select id="f-cap">
+          <option value="0">Any</option>
+          <option value="2e9">≥ $2B (mid+)</option>
+          <option value="1e10">≥ $10B (large)</option>
+          <option value="2e11">≥ $200B (mega)</option>
+        </select>
+      </label>
+      <label>Show
+        <select id="f-limit">
+          <option value="25">Top 25</option>
+          <option value="50" selected>Top 50</option>
+          <option value="100">Top 100</option>
+          <option value="250">Top 250</option>
+          <option value="0">All</option>
+        </select>
+      </label>
+      <label class="grow">Search
+        <input id="f-search" type="search" placeholder="Ticker or company">
+      </label>
+    </section>
+
+    <section class="tiles" id="tiles" aria-label="Summary"></section>
+
+    <section class="grid2">
+      <figure class="card">
+        <figcaption><h2 id="top-title">Top 20</h2><p class="hint">Hover a bar for details</p></figcaption>
+        <div id="chart-top" class="chart"></div>
+      </figure>
+      <figure class="card">
+        <figcaption><h2 id="sector-title">Median return by sector</h2><p class="hint">All stocks in the current filter</p></figcaption>
+        <div id="chart-sector" class="chart"></div>
+      </figure>
+    </section>
+
+    <section class="card">
+      <div class="table-head">
+        <h2 id="table-title">Leaders</h2>
+        <p class="hint">Click a column to sort · click a row to open the ticker on Yahoo Finance</p>
+      </div>
+      <div class="table-wrap">
+        <table id="table">
+          <thead><tr></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="foot">
+      Prices from Yahoo Finance, listings from Nasdaq. Growth score = average percentile rank of 1M, 3M, 6M and 1Y returns (0–100).
+      For viewing only, not investment advice.
+    </footer>
+  </div>
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <script src="assets/app.js"></script>
+</body>
+</html>
