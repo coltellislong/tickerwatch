@@ -168,7 +168,9 @@ tbody tr.setup-buy:hover { background: var(--hl-bg); filter: brightness(0.97); }
 }
 .badge.breakout, .badge.dip { color: var(--up-text); }
 .badge.hot, .badge.trim { color: var(--warn-text); border-color: var(--warn-edge); }
-.badge.buy { color: var(--up-text); }
+.badge.buy, .badge.buy1 { color: var(--up-text); }
+.badge.watch1, .badge.neutral1 { color: var(--text-secondary); }
+.badge.avoid1 { color: var(--text-muted); }
 .badge.watch, .badge.hold { color: var(--text-secondary); }
 .badge.avoid { color: var(--text-muted); }
 .badge.risk { color: var(--down-text); }
@@ -268,7 +270,7 @@ tbody tr.setup-buy:hover { background: var(--hl-bg); filter: brightness(0.97); }
 .d-card .hint { margin-bottom: 6px; }
 .d-wide { grid-column: 1 / -1; }
 .d-score .ex-head { margin-bottom: 4px; }
-.d-subs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 4px 0 12px; }
+.d-subs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 4px 0 12px; }
 .d-subs div { display: flex; flex-direction: column; font-size: 11px; color: var(--text-secondary); }
 .d-subs b { font-size: 18px; color: var(--text-primary); }
 .d-score .cats { grid-template-columns: 1fr; }

@@ -3,6 +3,7 @@
 
   const METRICS = {
     lts: { label: "Long-term score", short: "LT score", pct: false },
+    y1: { label: "1-year score", short: "1-yr score", pct: false },
     ltq: { label: "Business quality", short: "Quality", pct: false },
     ltv: { label: "Value at today's price", short: "Value", pct: false },
     mos: { label: "Margin of safety", short: "MoS", pct: true },
@@ -24,11 +25,12 @@
     { key: "marketCap", label: "Mkt cap", fmt: (v) => fmtCap(v) },
     { key: "price", label: "Price", fmt: (v) => "$" + fmtNum(v, 2) },
     { key: "lts", label: "LT score", fmt: (v) => fmtNum(v, 0), only: "long" },
-    { key: "ltq", label: "Quality", fmt: (v) => fmtNum(v, 0), only: "long" },
-    { key: "ltv", label: "Value", fmt: (v) => fmtNum(v, 0), only: "long" },
-    { key: "mos", label: "MoS", ret: true, only: "long" },
-    { key: "fit", label: "Fit", fmt: (v) => fmtNum(v, 0), only: "long", need: () => hasPf() },
-    ...["r1w", "r1m", "r3m", "r6m", "rytd", "r1y"].map((k) => ({ key: k, label: METRICS[k].short, ret: true, only: k === "r1w" || k === "r6m" ? "short" : null })),
+    { key: "y1", label: "1-yr score", fmt: (v) => fmtNum(v, 0), only: "year" },
+    { key: "ltq", label: "Quality", fmt: (v) => fmtNum(v, 0), only: ["long", "year"] },
+    { key: "ltv", label: "Value", fmt: (v) => fmtNum(v, 0), only: ["long", "year"] },
+    { key: "mos", label: "MoS", ret: true, only: ["long", "year"] },
+    { key: "fit", label: "Fit", fmt: (v) => fmtNum(v, 0), only: ["long", "year"], need: () => hasPf() },
+    ...["r1w", "r1m", "r3m", "r6m", "rytd", "r1y"].map((k) => ({ key: k, label: METRICS[k].short, ret: true, only: k === "r1w" ? "short" : k === "r6m" ? ["short", "year"] : null })),
     { key: "score", label: "Momentum", fmt: (v) => fmtNum(v, 0) },
     { key: "spark", label: "1Y trend", sortable: false },
   ];
@@ -272,10 +274,90 @@
     return { kind: lt.signal, why: [] };
   }
 
+  // ---------- 1-year horizon ----------
+  // A 12-month view blends business quality (30%), value (25%), price momentum
+  // (25%, the Momentum score), trend health (10%) and risk (10%). Momentum
+  // carries real weight here because, unlike for 3-10 years, a year is short
+  // enough for the market's current direction to matter.
+  const Y1_SIGNALS = {
+    buy1: { label: "1-yr buy", tone: "buy" },
+    watch1: { label: "1-yr watch", tone: "neutral" },
+    neutral1: { label: "Neutral", tone: "muted" },
+    avoid1: { label: "Avoid", tone: "muted" },
+    risk: { label: "Risk review", tone: "risk" },
+  };
+  function oneYear(s) {
+    const lt = s.lt;
+    if (!lt || lt.score == null || lt.quality == null || lt.value == null || s.score == null) return null;
+    const up200 = s.sma200 != null && s.price > s.sma200;
+    const trend = s.sma200 == null ? 50 : (up200 ? 50 : 0) + (s.sma50 > s.sma200 ? 50 : 0);
+    const E = lt.cats.E;
+    let risk = E[1] ? (E[0] / E[1]) * 100 : 50;
+    if (s.vol20 > 4) risk -= 30; else if (s.vol20 > 3) risk -= 15;
+    risk = Math.max(0, risk);
+    const score = 0.3 * lt.quality + 0.25 * lt.value + 0.25 * s.score + 0.1 * trend + 0.1 * risk;
+    const hot = s.setup && s.setup.kind === "hot";
+    let kind;
+    if (lt.flags.length) kind = "risk";
+    else if (score >= 75 && lt.quality >= 60 && s.score >= 50 && up200 && !hot) kind = "buy1";
+    else if (score >= 65) kind = "watch1";
+    else if (score >= 45) kind = "neutral1";
+    else kind = "avoid1";
+    const review = s.sma200 != null ? Math.max(s.sma200, s.price * 0.85) : s.price * 0.85;
+    const target = lt.fv && lt.fv[1] > s.price ? lt.fv[1] : null;
+    return { score: Math.round(score * 10) / 10, kind, trend, risk, up200, hot, review, target };
+  }
+
+  function y1Explain(s) {
+    const y = s.yr;
+    const lt = s.lt;
+    const sig = Y1_SIGNALS[y.kind];
+    const mom = s.score;
+    const parts = [
+      `<b>Good soil</b> (business quality): ${grade(lt.quality)}, ${fmtNum(lt.quality, 0)}/100.`,
+      `<b>Seeds on sale</b> (value at today's price): ${grade(lt.value)}, ${fmtNum(lt.value, 0)}/100${lt.mos != null ? `; the price is ${lt.mos >= 0 ? `${fmtNum(lt.mos, 0)}% below` : `${fmtNum(-lt.mos, 0)}% above`} the fair-value estimate` : ""}.`,
+      `<b>Sunshine</b> (momentum): ${grade(mom)}, ${fmtNum(mom, 0)}/100; ${fmtPct(s.r1y)} over the past year and ${fmtPct(s.r3m)} over 3 months.`,
+      `<b>Weather</b> (trend and risk): the price is ${y.up200 ? "above" : "below"} its 200-day average${s.vol20 != null ? `, with typical daily moves of ${fmtNum(s.vol20, 1)}%` : ""}.`,
+    ];
+    let plan, hold, exit;
+    if (y.kind === "buy1") {
+      plan = "All four ingredients line up: a sound business, a reasonable price, and the market already moving its way. Many investors look for exactly this mix of quality, value and momentum for a one-year holding, but this rule hasn't been backtested and nothing is guaranteed.";
+      hold = "About <b>12 months</b>. Check in every quarter, after each earnings report.";
+      exit = `Get out if it closes below <b>$${fmtNum(y.review, 2)}</b> (its 200-day average or 15% below today, whichever is higher), or if a red flag shows up.` +
+        (y.target ? ` If it climbs to about <b>$${fmtNum(y.target, 2)}</b> (the fair-value estimate), consider taking some profit.` : "");
+    } else if (y.kind === "watch1") {
+      const miss = [];
+      if (y.score < 75) miss.push(`the 1-year score is ${fmtNum(y.score, 0)} (a buy needs 75)`);
+      if (lt.quality < 60) miss.push("the business quality is below 60");
+      if (mom < 50) miss.push("the momentum is weak");
+      if (!y.up200) miss.push("the price is below its 200-day average");
+      if (y.hot) miss.push("it has run up too fast lately");
+      plan = `Close, but not yet: ${miss.join(", ") || "it narrowly misses a buy check"}.`;
+      hold = "Keep it on your list and look again next month.";
+    } else if (y.kind === "risk") {
+      plan = `A red flag blocks any buy signal: ${lt.flags.map(esc).join("; ")}.`;
+      hold = "Avoid for a 1-year holding until the next annual report clears it.";
+    } else {
+      plan = "The ingredients don't line up well enough for a one-year holding right now.";
+      hold = "Skip it for now; the scores update every weekday.";
+    }
+    return `
+      <div class="ex-head"><span class="badge ${y.kind}">${sig.label}</span><b>${esc(s.symbol)}</b><span class="ex-name">${esc(s.name)}</span></div>
+      <div class="ex-score"><b>${fmtNum(y.score, 0)}</b><span>/100 · 1-year score</span></div>
+      <p class="ex-k">What it saw</p><p>A one-year investment is like planting a garden for one season. ${parts.join(" ")}</p>
+      <p class="ex-k">What it means</p><p>${plan}</p>
+      ${hold ? `<p class="ex-k">How long to stay in</p><p>${hold}</p>` : ""}
+      ${exit ? `<p class="ex-k">When to leave</p><p>${exit}</p>` : ""}
+      <p class="ex-note">1-year score = quality 30% + value 25% + momentum 25% + trend 10% + risk 10%, from SEC filings and prices as of ${esc(state.data.asOf)}. A ranking, not a prediction; not backtested. Not financial advice. Click the row for charts and every metric.</p>`;
+  }
+
   // The signal shown for a stock under the current horizon.
   function sigOf(s) {
     if (state.horizon === "short") {
       return s.setup ? { kind: s.setup.kind, label: SETUP_LABELS[s.setup.kind], tone: s.setup.kind === "hot" ? "warn" : "buy" } : null;
+    }
+    if (state.horizon === "year") {
+      return s.yr ? { kind: s.yr.kind, ...Y1_SIGNALS[s.yr.kind] } : null;
     }
     const sig = ltSig(s);
     return sig ? { kind: sig.kind, ...LT_SIGNALS[sig.kind] } : null;
@@ -394,6 +476,11 @@
   function showExplain(btn) {
     const s = state.data.stocks.find((x) => x.symbol === btn.dataset.sym);
     if (!s) return;
+    if (state.horizon === "year") {
+      if (!s.yr) return;
+      explainBox.innerHTML = y1Explain(s);
+      return openExplain(btn);
+    }
     if (state.horizon === "long") {
       if (!s.lt || s.lt.score == null) return;
       explainBox.innerHTML = ltExplain(s);
@@ -636,6 +723,7 @@
           <div class="d-subs">
             <div><span>Quality</span><b>${fmtNum(lt.quality, 0)}</b></div>
             <div><span>Value</span><b>${fmtNum(lt.value, 0)}</b></div>
+            <div><span>1-year score</span><b>${s.y1 == null ? "—" : fmtNum(s.y1, 0)}</b></div>
             <div><span>Portfolio fit</span><b>${s.fit == null ? "—" : fmtNum(s.fit, 0)}</b></div>
           </div>
           <div class="cats">${catBars(lt)}</div>
@@ -765,7 +853,12 @@
     } else {
       tiles.push({ label: "Score ≥ 90", value: vals.filter((v) => v >= 90).length.toLocaleString(), note: "consistently strong across windows" });
     }
-    if (state.horizon === "long") {
+    if (state.horizon === "year") {
+      const count = (k) => rows.filter((s) => s.yr && s.yr.kind === k).length;
+      const nbuy = count("buy1");
+      tiles.splice(2, 1, { label: "Scored", value: rows.filter((s) => s.y1 != null).length.toLocaleString(), note: "with filing and price data" });
+      tiles.push({ label: "1-yr buys", value: nbuy.toLocaleString(), cls: nbuy ? "up" : "", note: `${count("watch1").toLocaleString()} on the 1-yr watchlist` });
+    } else if (state.horizon === "long") {
       const count = (k) => rows.filter((s) => s.lt && s.lt.signal === k).length;
       const nbuy = count("buy");
       tiles.splice(2, 1, { label: "Scored", value: rows.filter((s) => s.lts != null).length.toLocaleString(), note: "with enough SEC filing data" });
@@ -775,7 +868,7 @@
       const nb = buys.filter((s) => s.setup.kind === "breakout").length;
       tiles.push({ label: "Setups for next open", value: buys.length.toLocaleString(), cls: buys.length ? "up" : "", note: `${nb} breakout · ${buys.length - nb} buy the dip` });
     }
-    tiles.push({ label: state.horizon === "long" ? "Top ranked" : "Top performer", value: top ? top.symbol : "—", note: top ? `${fmtMetric(m, top[m])} · ${top.name}` : "" });
+    tiles.push({ label: state.horizon === "short" ? "Top performer" : "Top ranked", value: top ? top.symbol : "—", note: top ? `${fmtMetric(m, top[m])} · ${top.name}` : "" });
     $("tiles").innerHTML = tiles
       .map((t) => `<div class="tile"><div class="label">${esc(t.label)}</div><div class="value ${t.cls || ""}">${esc(t.value)}</div>${t.note ? `<div class="note">${esc(t.note)}</div>` : ""}</div>`)
       .join("");
@@ -870,13 +963,15 @@
   }
 
   function syncSignalOptions() {
-    const opts = state.horizon === "long"
+    const opts = state.horizon === "year"
+      ? [["", "All stocks"], ["held", "My holdings"], ["buy1", "1-yr buy"], ["watch1", "1-yr watch"], ["neutral1", "Neutral"], ["avoid1", "Avoid"], ["risk", "Risk review"]]
+      : state.horizon === "long"
       ? [["", "All stocks"], ["held", "My holdings"], ["buy", "Buy review / Accumulate"], ["watch", "Watchlist"], ["hold", "Hold"], ["trim", "Trim review"], ["exit", "Exit review (owned)"], ["avoid", "Avoid"], ["risk", "Risk review"]]
       : [["", "All stocks"], ["held", "My holdings"], ["buy", "Setups for next open"], ["breakout", "Breakouts"], ["dip", "Buy the dip"], ["hot", "Too hot (avoid chasing)"]];
     $("f-setup").innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
     $("f-setup").value = state.setup;
   }
-  const visibleColumns = () => COLUMNS.filter((c) => (!c.only || c.only === state.horizon) && (!c.need || c.need()));
+  const visibleColumns = () => COLUMNS.filter((c) => (!c.only || [].concat(c.only).includes(state.horizon)) && (!c.need || c.need()));
 
   function renderTable(rows) {
     const COLUMNS = visibleColumns();
@@ -978,7 +1073,7 @@
       state.setup = "";
       state.sortKey = null;
       // Each horizon opens on its own headline ranking.
-      state.metric = state.horizon === "long" ? "lts" : "score";
+      state.metric = { long: "lts", year: "y1", short: "score" }[state.horizon];
       $("f-metric").value = state.metric;
       syncSignalOptions();
       hideExplain();
@@ -1064,6 +1159,8 @@
       s.ltq = lt.quality ?? null;
       s.ltv = lt.value ?? null;
       s.mos = lt.mos ?? null;
+      s.yr = oneYear(s);
+      s.y1 = s.yr ? s.yr.score : null;
     }
     if (!d.stocks.some((s) => s.lts != null)) {
       // No fundamentals yet: start on the momentum view.

@@ -35,6 +35,20 @@ Each metric earns full, half or zero points. Metrics that need paid or hand-gath
 
 The thresholds are starting defaults and haven't been backtested. The score ranks stocks; it is not a probability of making money. Scoring lives in `scripts/score.py`.
 
+## 1-year horizon
+
+A middle view for roughly 12-month holdings. **1-year score** (0–100) = business quality 30% + value at today's price 25% + Momentum score 25% + trend health 10% (price above the 200-day average, 50-day above 200-day) + risk 10% (balance-sheet risk category, minus a penalty for high daily volatility). Momentum gets real weight because a year is short enough for the market's current direction to matter.
+
+| Signal | Rule |
+|---|---|
+| **1-yr buy** | score ≥ 75, quality ≥ 60, Momentum ≥ 50, price above its 200-day average, not "too hot", no red flags. Hold about 12 months, review quarterly; exit below the higher of the 200-day average or −15%; consider taking profit near the fair-value estimate |
+| **1-yr watch** | score ≥ 65 |
+| **Neutral** | score 45–64 |
+| **Avoid** | score below 45 |
+| **Risk review** | any long-term red flag |
+
+Computed in the browser from the same data (`oneYear()` in `assets/app.js`); not backtested.
+
 ## My portfolio
 
 Enter your holdings (ticker, shares, optional average cost, plus cash) in the **My portfolio** card. They're saved in your browser's local storage only, never uploaded, so they don't follow you to another device or browser.
