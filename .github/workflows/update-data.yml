@@ -5,6 +5,7 @@ on:
     - cron: "37 21 * * 1-5"   # weekdays ~5:37pm ET, after the US close
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - "scripts/fetch_data.py"
       - "requirements.txt"

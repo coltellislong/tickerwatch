@@ -14,6 +14,7 @@
   const COLUMNS = [
     { key: "rank", label: "#", sortable: false },
     { key: "symbol", label: "Ticker", cls: "l sym" },
+    { key: "setup", label: "Signal", cls: "l", sortable: false },
     { key: "name", label: "Company", cls: "l name" },
     { key: "sector", label: "Sector", cls: "l" },
     { key: "marketCap", label: "Mkt cap", fmt: (v) => fmtCap(v) },
@@ -24,7 +25,7 @@
   ];
 
   const $ = (id) => document.getElementById(id);
-  const state = { data: null, metric: "r1y", sector: "", cap: 0, limit: 50, q: "", sortKey: null, sortDir: -1 };
+  const state = { data: null, metric: "r1y", sector: "", cap: 0, limit: 50, q: "", sortKey: null, sortDir: -1, setup: "" };
 
   // ---------- formatting ----------
   function fmtNum(v, d) {
@@ -94,12 +95,96 @@
       <div class="r"><span>Growth score</span><b>${fmtNum(s.score, 0)}</b></div>`;
   }
 
+  // ---------- next-session setups ----------
+  // Mechanical momentum rules applied to the latest close. They describe a
+  // pattern; they don't predict tomorrow's price.
+  const SETUP_LABELS = { breakout: "Breakout", dip: "Buy the dip", hot: "Too hot" };
+  const money = (v) => "$" + fmtNum(v, 2);
+
+  function setupFor(s) {
+    const { price, sma50, sma200, rsi14, offHigh, volRatio, dollarVol } = s;
+    if ([price, sma50, sma200, rsi14].some((v) => v == null)) return null;
+    // Skip thinly traded or very cheap shares, where these patterns are unreliable.
+    if (price < 5 || (dollarVol != null && dollarVol < 5e6)) return null;
+    const trendUp = sma50 > sma200;
+
+    if (rsi14 >= 80 || (s.r1m != null && s.r1m >= 60)) {
+      return {
+        kind: "hot",
+        saw: `${s.symbol} shot up ${fmtPct(s.r1m)} in one month. Its “tiredness meter” (RSI) reads ${fmtNum(rsi14, 0)} out of 100. Above 70 means it has been running hard.`,
+        why: "It's like a balloon that got blown up really fast. It might get bigger, but it often lets a little air out first. Buying now means paying the top price right after the rush.",
+        hold: "Don't chase it. Check again in a week or two, after it has cooled off.",
+      };
+    }
+    if (trendUp && price > sma50 && offHigh != null && offHigh <= 3 && rsi14 >= 55 && rsi14 < 75 && (volRatio || 0) >= 1.2 && (s.r3m || 0) > 0) {
+      const stop = Math.max(sma50, price * 0.92);
+      return {
+        kind: "breakout",
+        stop,
+        saw: `${s.symbol} is like a kid climbing stairs. It's ${fmtPct(s.r1y ?? s.r6m)} higher than ${s.r1y != null ? "a year" : "six months"} ago, and right now it's standing ${offHigh < 0.5 ? "on its highest step all year" : `just ${fmtNum(offHigh, 1)}% below its highest step all year`}.`,
+        why: `More people than usual are buying it: about ${fmtNum(volRatio, 1)}× its normal amount of trading. When lots of buyers push a stock up to new highs, it often keeps climbing for a while. Its tiredness meter reads ${fmtNum(rsi14, 0)}/100: busy, but not worn out.`,
+        hold: "About 4 to 8 weeks, as long as it keeps climbing.",
+        exit: `Get out if it closes below ${money(stop)}. That means the stairs broke. If it keeps rising, move that exit price up to its 50-day average each week.`,
+      };
+    }
+    if (trendUp && price > sma200 && price >= sma50 * 0.95 && (s.score || 0) >= 80 && s.r1w != null && s.r1w <= -2 && s.r1w >= -10 && rsi14 >= 35 && rsi14 <= 50) {
+      const stop = Math.max(sma200, price * 0.9);
+      return {
+        kind: "dip",
+        stop,
+        saw: `${s.symbol} has been one of the steadiest climbers on the market (growth score ${fmtNum(s.score, 0)} out of 100), but it slipped ${fmtNum(Math.abs(s.r1w), 1)}% this week.`,
+        why: `It's like a fast runner stopping to tie a shoe. The big trend still points up: the price is above its 200-day average (${money(sma200)}), the slow line that shows where a stock is heading over many months. Buying a small dip in a strong climber is a common strategy.`,
+        hold: "About 1 to 3 months.",
+        exit: `Get out if it closes below ${money(stop)}. That would mean the runner has stopped, not just paused.`,
+      };
+    }
+    return null;
+  }
+
+  const explainBox = $("explain");
+  let explainFor = null;
+  let explainOpenedAt = 0;
+  function showExplain(btn) {
+    const s = state.data.stocks.find((x) => x.symbol === btn.dataset.sym);
+    if (!s || !s.setup) return;
+    const u = s.setup;
+    const buy = u.kind !== "hot";
+    explainBox.innerHTML = `
+      <div class="ex-head"><span class="badge ${u.kind}">${SETUP_LABELS[u.kind]}</span><b>${esc(s.symbol)}</b><span class="ex-name">${esc(s.name)}</span></div>
+      <p class="ex-k">What it saw</p><p>${esc(u.saw)}</p>
+      <p class="ex-k">${buy ? "Why it might keep going" : "Why it's a warning"}</p><p>${esc(u.why)}</p>
+      <p class="ex-k">${buy ? "How long to stay in" : "What to do"}</p><p>${esc(u.hold)}</p>
+      ${u.exit ? `<p class="ex-k">When to leave</p><p>${esc(u.exit)}</p>` : ""}
+      <p class="ex-note">A simple rule applied to the ${esc(state.data.asOf)} closing prices, not a prediction or financial advice. Prices can jump or drop at the open. Only invest money you can afford to lose.</p>`;
+    explainBox.hidden = false;
+    explainFor = btn;
+    explainOpenedAt = Date.now();
+    btn.setAttribute("aria-expanded", "true");
+    placeExplain();
+  }
+  function placeExplain() {
+    if (!explainFor) return;
+    const r = explainFor.getBoundingClientRect();
+    const box = explainBox.getBoundingClientRect();
+    let x = Math.min(r.left, window.innerWidth - box.width - 8);
+    let y = r.bottom + 6;
+    if (y + box.height > window.innerHeight - 8) y = Math.max(8, r.top - box.height - 6);
+    explainBox.style.left = Math.max(8, x) + "px";
+    explainBox.style.top = y + "px";
+  }
+  function hideExplain() {
+    explainBox.hidden = true;
+    if (explainFor) explainFor.setAttribute("aria-expanded", "false");
+    explainFor = null;
+  }
+
   // ---------- data pipeline ----------
   function filtered() {
     const q = state.q.trim().toLowerCase();
     return state.data.stocks.filter(
       (s) =>
         (!state.sector || s.sector === state.sector) &&
+        (!state.setup || (state.setup === "buy" ? s.setup && s.setup.kind !== "hot" : s.setup && s.setup.kind === state.setup)) &&
         s.marketCap >= state.cap &&
         (!q || s.symbol.toLowerCase().includes(q) || s.name.toLowerCase().includes(q))
     );
@@ -130,6 +215,9 @@
     } else {
       tiles.push({ label: "Score ≥ 90", value: vals.filter((v) => v >= 90).length.toLocaleString(), note: "consistently strong across windows" });
     }
+    const buys = rows.filter((s) => s.setup && s.setup.kind !== "hot");
+    const nb = buys.filter((s) => s.setup.kind === "breakout").length;
+    tiles.push({ label: "Setups for next open", value: buys.length.toLocaleString(), cls: buys.length ? "up" : "", note: `${nb} breakout · ${buys.length - nb} buy the dip` });
     tiles.push({ label: "Top performer", value: top ? top.symbol : "—", note: top ? `${fmtMetric(m, top[m])} · ${top.name}` : "" });
     $("tiles").innerHTML = tiles
       .map((t) => `<div class="tile"><div class="label">${esc(t.label)}</div><div class="value ${t.cls || ""}">${esc(t.value)}</div>${t.note ? `<div class="note">${esc(t.note)}</div>` : ""}</div>`)
@@ -238,13 +326,19 @@
         const cells = COLUMNS.map((c) => {
           if (c.key === "rank") return `<td class="na">${i + 1}</td>`;
           if (c.key === "spark") return `<td>${sparkline(s.spark)}</td>`;
+          if (c.key === "setup") {
+            if (!s.setup) return `<td class="l"></td>`;
+            const k = s.setup.kind;
+            return `<td class="l"><span class="sig"><span class="badge ${k}">${SETUP_LABELS[k]}</span><button type="button" class="why" data-sym="${esc(s.symbol)}" aria-expanded="false" aria-controls="explain">Why?</button></span></td>`;
+          }
           const v = s[c.key];
           if (c.ret) return `<td class="${retClass(v)}">${fmtPct(v)}</td>`;
           if (c.key === "symbol") return `<td class="${c.cls}"><a href="${yahoo(v)}" target="_blank" rel="noopener">${esc(v)}</a></td>`;
           const text = c.fmt ? c.fmt(v) : v == null ? "—" : v;
           return `<td class="${c.cls || ""}"${c.key === "name" ? ` title="${esc(v)}"` : ""}>${esc(text)}</td>`;
         }).join("");
-        return `<tr data-sym="${esc(s.symbol)}">${cells}</tr>`;
+        const hl = s.setup ? (s.setup.kind === "hot" ? " setup-hot" : " setup-buy") : "";
+        return `<tr class="${hl.trim()}" data-sym="${esc(s.symbol)}">${cells}</tr>`;
       })
       .join("");
   }
@@ -278,7 +372,20 @@
     };
     thead.addEventListener("click", (e) => { const th = e.target.closest("th"); if (th) sortBy(th); });
     thead.addEventListener("keydown", (e) => { const th = e.target.closest("th"); if (th && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); sortBy(th); } });
-    $("table").querySelector("tbody").addEventListener("click", (e) => {
+    const tbody = $("table").querySelector("tbody");
+    // Hover or focus opens the explanation; a tap toggles it on touch screens.
+    tbody.addEventListener("mouseover", (e) => { const b = e.target.closest(".why"); if (b && b !== explainFor) showExplain(b); });
+    tbody.addEventListener("mouseout", (e) => { const b = e.target.closest(".why"); if (b && !b.contains(e.relatedTarget)) hideExplain(); });
+    tbody.addEventListener("focusin", (e) => { const b = e.target.closest(".why"); if (b) showExplain(b); });
+    tbody.addEventListener("focusout", (e) => { if (e.target.closest(".why")) hideExplain(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideExplain(); });
+    document.addEventListener("click", (e) => { if (!e.target.closest(".why")) hideExplain(); });
+    window.addEventListener("scroll", placeExplain, { passive: true });
+    $("f-setup").addEventListener("change", (e) => { state.setup = e.target.value; render(); });
+    tbody.addEventListener("click", (e) => {
+      const why = e.target.closest(".why");
+      // A tap fires mouseover then click; don't let the click close what the tap just opened.
+      if (why) { explainFor === why && Date.now() - explainOpenedAt > 500 ? hideExplain() : showExplain(why); return; }
       if (e.target.closest("a")) return;
       const tr = e.target.closest("tr");
       if (tr) window.open(yahoo(tr.dataset.sym), "_blank", "noopener");
@@ -302,6 +409,7 @@
       return;
     }
     const d = state.data;
+    for (const s of d.stocks) s.setup = setupFor(s);
     $("asof").textContent = `${d.count.toLocaleString()} US stocks with market cap ≥ ${fmtCap(d.minMarketCap)} · prices as of ${d.asOf} · updated ${new Date(d.generatedAt).toLocaleString()}`;
     $("sample-banner").hidden = !d.sample;
     const sectors = [...new Set(d.stocks.map((s) => s.sector))].sort();

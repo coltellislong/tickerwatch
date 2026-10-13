@@ -7,6 +7,18 @@ It's meant for viewing only, not investment advice.
 - **Filter** by sector, market cap and ticker/name search. Sort the table by any column. Click a row to open the ticker on Yahoo Finance.
 - **Charts:** the top 20 for the chosen window, plus the median return by sector. Every row has a 1-year sparkline.
 
+## Next-open setups
+
+Rows highlighted green match one of two well-known momentum patterns, checked against the latest close. Hover or tap **Why?** for a plain-English explanation, how long the rule suggests holding, and the price at which to get out.
+
+| Signal | Rule | Suggested hold | Exit |
+|---|---|---|---|
+| **Breakout** | Price above its 50-day average, which is above its 200-day; within 3% of its 1-year high; RSI 55–75; 10-day volume ≥ 1.2× the 50-day average; 3-month return positive | about 4–8 weeks | close below the higher of the 50-day average or −8% |
+| **Buy the dip** | Growth score ≥ 80; 50-day above 200-day and price above the 200-day; down 2–10% this week; RSI 35–50 | about 1–3 months | close below the higher of the 200-day average or −10% |
+| **Too hot** (warning) | RSI ≥ 80 or up 60%+ in a month | don't chase | — |
+
+Only stocks priced at least $5 that trade at least $5M a day qualify. These are mechanical screens, not predictions or financial advice. The rules live in `setupFor()` in `assets/app.js`.
+
 ## How it works
 
 ```
