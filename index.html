@@ -84,10 +84,27 @@
       </figure>
     </section>
 
+    <section class="card pf" id="pf" aria-labelledby="pf-title">
+      <div class="table-head">
+        <h2 id="pf-title">My portfolio</h2>
+        <p class="hint">Saved only in this browser · nothing is sent anywhere</p>
+      </div>
+      <form id="pf-form" class="pf-form" autocomplete="off">
+        <label>Ticker <input id="pf-sym" list="pf-syms" required placeholder="e.g. MSFT" autocapitalize="characters"></label>
+        <label>Shares <input id="pf-shares" type="number" min="0" step="any" required placeholder="10"></label>
+        <label>Avg cost / share <input id="pf-cost" type="number" min="0" step="any" placeholder="optional"></label>
+        <button type="submit" class="btn">Add or update</button>
+        <label class="pf-cash">Cash <input id="pf-cash" type="number" min="0" step="any" placeholder="0"></label>
+      </form>
+      <datalist id="pf-syms"></datalist>
+      <p id="pf-msg" class="pf-msg" role="status"></p>
+      <div id="pf-body"></div>
+    </section>
+
     <section class="card">
       <div class="table-head">
         <h2 id="table-title">Leaders</h2>
-        <p class="hint">Green rows are buy signals · hover or tap “Why?” for the plain-English reason · click a row to open it on Yahoo Finance</p>
+        <p class="hint">Green rows are buy signals · hover or tap “Why?” for the plain-English reason · click a row for the full detail view</p>
       </div>
       <div class="table-wrap">
         <table id="table">
@@ -105,11 +122,13 @@
       Signals: <b>Breakout</b> = uptrend (price above its 50-day average, which is above its 200-day), within 3% of its 1-year high, RSI 55–75, trading 1.2× normal volume.
       <b>Buy the dip</b> = growth score ≥ 80 and long-term uptrend, down 2–10% this week, RSI 35–50.
       <b>Too hot</b> = RSI ≥ 80 or up 60%+ in a month. Only stocks priced ≥ $5 trading ≥ $5M a day qualify.
-      For viewing only, not investment advice.
+      <b>My portfolio</b> signals: <b>Accumulate</b> = owned, score ≥ 80, still attractively valued, under the 5% position and 25% sector caps; <b>Trim review</b> = position over 5% or price 60%+ above fair value; <b>Exit review</b> = a red flag or score below 50. Portfolio Fit (0–100) = room under the position cap 40 + room under the sector cap 35 + diversification 25.
+      For research only, not investment advice.
     </footer>
   </div>
   <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
   <div id="explain" class="explain" role="tooltip" hidden></div>
+  <dialog id="detail" class="detail" aria-labelledby="d-title"><div id="detail-body"></div></dialog>
   <script src="assets/app.js"></script>
 </body>
 </html>

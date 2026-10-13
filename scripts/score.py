@@ -29,6 +29,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 STOCKS = ROOT / "data" / "stocks.json"
 FUNDAMENTALS = ROOT / "data" / "fundamentals.json"
+HISTORY = ROOT / "data" / "score_history.json"
+HISTORY_WEEKS = 104
 
 WEIGHTS = {"A": 25, "B": 20, "C": 20, "D": 15, "E": 10, "F": 10}
 QUALITY_CATS = ("A", "B", "D", "E")
@@ -465,8 +467,46 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
         "flags": flags, "warns": warns, "fin": fin,
         "cats": {k: [round(v[0], 1), v[1], v[2]] for k, v in cats.items()},
         "m": [[m[0], m[1], m[2], m[3], m[4]] for m in c.metrics],
-        "fy": f["fy"][-1], "filed": filed,
+        "fy": f["fy"][-1], "filed": filed, "cik": f.get("cik"),
+        # Six years of headline financials for the detail view's charts ($M and %).
+        "fin": {
+            "fy": [e[:4] for e in f["fy"]],
+            "rev": [None if x is None else round(x / 1e6) for x in d["rev"]],
+            "fcf": [None if x is None else round(x / 1e6) for x in d["fcf"]],
+            "ni": [None if x is None else round(x / 1e6) for x in d["netinc"]],
+            "opm": [None if x is None else round(x * 100, 1) for x in d["opm"]],
+            "roic": [None if x is None else round(x * 100, 1) for x in (d["roe"] if fin else d["roic"])],
+            "roicLabel": "ROE" if fin else "ROIC",
+        },
     }
+
+
+def update_history(stocks: list, today: date) -> None:
+    """Keep one long-term score per stock per week (the week's latest run), two years deep."""
+    hist = json.loads(HISTORY.read_text()) if HISTORY.exists() else {"dates": [], "scores": {}}
+    dates, scores = hist["dates"], hist["scores"]
+    stamp = today.isoformat()
+    same_week = bool(dates) and date.fromisoformat(dates[-1]).isocalendar()[:2] == today.isocalendar()[:2]
+    if same_week:
+        dates[-1] = stamp
+    else:
+        dates.append(stamp)
+    n = len(dates)
+    current = {s["symbol"]: s["lt"]["score"] for s in stocks if s.get("lt") and s["lt"].get("score") is not None}
+    for sym in set(scores) | set(current):
+        col = scores.setdefault(sym, [])
+        col.extend([None] * (n - (0 if same_week else 1) - len(col)))  # pad weeks it was missing
+        if same_week and len(col) == n:
+            col[-1] = current.get(sym)
+        else:
+            col.append(current.get(sym))
+    if n > HISTORY_WEEKS:
+        dates[:] = dates[-HISTORY_WEEKS:]
+        for sym in scores:
+            scores[sym] = scores[sym][-HISTORY_WEEKS:]
+    # Drop symbols with nothing left to show.
+    hist["scores"] = {k: v for k, v in scores.items() if any(x is not None for x in v)}
+    HISTORY.write_text(json.dumps(hist, separators=(",", ":")))
 
 
 def main() -> None:
@@ -530,6 +570,7 @@ def main() -> None:
         except Exception as exc:  # one malformed filing shouldn't sink the run
             print(f"score {s['symbol']} failed: {exc!r}", file=sys.stderr)
 
+    update_history(stocks, today)
     stocks_doc["fundamentalsAt"] = json.loads(FUNDAMENTALS.read_text()).get("generatedAt")
     stocks_doc["ltScored"] = scored
     STOCKS.write_text(json.dumps(stocks_doc, separators=(",", ":")))

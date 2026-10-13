@@ -35,7 +35,27 @@ Each metric earns full, half or zero points. Metrics that need paid or hand-gath
 
 The thresholds are starting defaults and haven't been backtested. The score ranks stocks; it is not a probability of making money. Scoring lives in `scripts/score.py`.
 
-**Not built yet:** analyst estimates, AI review of filings for moat and governance evidence, a portfolio/holdings view (position sizes, sector caps, Portfolio Fit score), and backtesting.
+## My portfolio
+
+Enter your holdings (ticker, shares, optional average cost, plus cash) in the **My portfolio** card. They're saved in your browser's local storage only, never uploaded, so they don't follow you to another device or browser.
+
+With holdings entered, the long-term signals become personal:
+
+| Signal | Rule |
+|---|---|
+| **Accumulate** | you own it, score ≥ 80, still attractively valued (valuation ≥ 60% of its points or ≥ 10% below fair value), and adding keeps you under the position and sector caps |
+| **Hold** | you own it and nothing has broken |
+| **Trim review** | you own it and it's over 5% of your portfolio, or the price is 60%+ above fair value |
+| **Exit review** | you own it and it has a red flag or its score fell below 50 |
+| **Buy review → Watchlist** | a buy candidate whose starter position would push its sector over 25% |
+
+The card shows total value, gain on cost, drawdown of today's holdings from their 1-year high (alerts at −10/−15/−20%), position and sector cap breaches, and speculative exposure (unscored or score < 50) above 5%. **Portfolio Fit** (0–100, the *Fit* column) = room under the 5% position cap (40) + room under the 25% sector cap (35) + diversification, fewer holdings in the same sector (25). Limits are constants at the top of the portfolio section in `assets/app.js`.
+
+## Stock detail view
+
+Click any row for a full page on that stock: score, quality, value and fit; category breakdown and red flags; a year of weekly prices against the bear/base/bull fair-value range; six fiscal years of revenue, free cash flow, operating margin and ROIC (ROE for financials); weekly long-term score history (stored in `data/score_history.json`, two years deep); the plain-language thesis; and every metric with the points it earned. Links go to Yahoo Finance and the company's SEC filings.
+
+**Not built yet:** analyst estimates, AI review of filings for moat and governance evidence, and backtesting.
 
 ## Short-term setups (switch Horizon)
 

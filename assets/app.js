@@ -27,6 +27,7 @@
     { key: "ltq", label: "Quality", fmt: (v) => fmtNum(v, 0), only: "long" },
     { key: "ltv", label: "Value", fmt: (v) => fmtNum(v, 0), only: "long" },
     { key: "mos", label: "MoS", ret: true, only: "long" },
+    { key: "fit", label: "Fit", fmt: (v) => fmtNum(v, 0), only: "long", need: () => hasPf() },
     ...["r1w", "r1m", "r3m", "r6m", "rytd", "r1y"].map((k) => ({ key: k, label: METRICS[k].short, ret: true, only: k === "r1w" || k === "r6m" ? "short" : null })),
     { key: "score", label: "Momentum", fmt: (v) => fmtNum(v, 0) },
     { key: "spark", label: "1Y trend", sortable: false },
@@ -149,12 +150,87 @@
     return null;
   }
 
-  // ---------- long-term signals (scored in scripts/score.py) ----------
+  // ---------- my portfolio (kept in this browser's localStorage only) ----------
+  const POS_CAP = 5;      // max % of the portfolio in one stock
+  const SECTOR_CAP = 25;  // max % in one sector
+  const STARTER = 2.5;    // a typical first position, % of the portfolio
+  const SPEC_CAP = 5;     // max % in speculative holdings (no score or score < 50)
+  const PF_KEY = "tickerwatch.portfolio.v1";
+  const pf = { positions: [], cash: 0 };
+  let P = null; // derived portfolio numbers, rebuilt by computePf()
+  const bySym = new Map();
+
+  function loadPf() {
+    try {
+      const v = JSON.parse(localStorage.getItem(PF_KEY) || "null");
+      if (v && Array.isArray(v.positions)) {
+        pf.positions = v.positions.filter((p) => p && typeof p.sym === "string" && p.shares > 0);
+        pf.cash = +v.cash || 0;
+      }
+    } catch { /* storage blocked: start empty */ }
+  }
+  function savePf() {
+    try { localStorage.setItem(PF_KEY, JSON.stringify(pf)); } catch { /* not persisted */ }
+  }
+  const hasPf = () => pf.positions.length > 0;
+  const isSpeculative = (s) => !s || !s.lt || s.lt.score == null || s.lt.score < 50;
+
+  function computePf() {
+    const rows = pf.positions.map((p) => {
+      const s = bySym.get(p.sym);
+      const value = s && s.price != null ? s.price * p.shares : null;
+      const gain = value != null && p.cost ? value - p.cost * p.shares : null;
+      return { ...p, s, value, gain, gainPct: gain != null ? (gain / (p.cost * p.shares)) * 100 : null };
+    });
+    const invested = rows.reduce((a, r) => a + (r.value || 0), 0);
+    const total = invested + (pf.cash || 0);
+    for (const r of rows) r.weight = total ? ((r.value || 0) / total) * 100 : 0;
+    const sectors = {};
+    for (const r of rows) {
+      const k = (r.s && r.s.sector) || "Unknown";
+      sectors[k] = (sectors[k] || 0) + r.weight;
+    }
+    const withCost = rows.filter((r) => r.gain != null);
+    const gain = withCost.reduce((a, r) => a + r.gain, 0);
+    const cost = withCost.reduce((a, r) => a + r.cost * r.shares, 0);
+    // Value of today's holdings along the past year's weekly closes, for drawdown alerts.
+    let dd = null;
+    const sp = rows.filter((r) => r.s && r.s.spark && r.s.spark.length > 1);
+    if (sp.length) {
+      const n = Math.min(...sp.map((r) => r.s.spark.length));
+      const series = Array.from({ length: n }, (_, i) => sp.reduce((a, r) => a + r.shares * r.s.spark[r.s.spark.length - n + i], 0) + (pf.cash || 0));
+      dd = (series[n - 1] / Math.max(...series) - 1) * 100;
+    }
+    const spec = rows.filter((r) => isSpeculative(r.s)).reduce((a, r) => a + r.weight, 0);
+    P = { rows, invested, total, sectors, gain: withCost.length ? gain : null, gainPct: cost ? (gain / cost) * 100 : null, dd, spec, held: new Map(rows.map((r) => [r.sym, r])) };
+    for (const s of state.data.stocks) s.fit = fitScore(s);
+  }
+
+  // Portfolio Fit (0-100): would adding this stock respect your limits and diversify you?
+  function fitScore(s) {
+    if (!hasPf()) return null;
+    const h = P.held.get(s.symbol);
+    const w = h ? h.weight : 0;
+    const after = w + (h ? 0 : STARTER);
+    const pos = after <= POS_CAP ? 40 : Math.max(0, 40 * (1 - (after - POS_CAP) / POS_CAP));
+    const secAfter = (P.sectors[s.sector] || 0) + (h ? 0 : STARTER);
+    const sec = secAfter <= SECTOR_CAP ? 35 : secAfter <= SECTOR_CAP + 5 ? 17.5 : 0;
+    const same = P.rows.filter((r) => r.s && r.s.sector === s.sector && r.sym !== s.symbol).length;
+    const div = same === 0 ? 25 : same <= 2 ? 12.5 : 0;
+    let fit = pos + sec + div;
+    if (!h && isSpeculative(s) && P.spec + STARTER > SPEC_CAP) fit = Math.min(fit, 30);
+    return Math.round(fit);
+  }
+
+  // ---------- long-term signals (scored in scripts/score.py, adjusted for your holdings) ----------
   const LT_SIGNALS = {
     buy: { label: "Buy review", tone: "buy" },
+    accumulate: { label: "Accumulate", tone: "buy" },
     watch: { label: "Watchlist", tone: "neutral" },
     hold: { label: "Hold / fair", tone: "neutral" },
+    holdOwned: { label: "Hold", tone: "neutral" },
     trim: { label: "Trim review", tone: "warn" },
+    exit: { label: "Exit review", tone: "risk" },
     avoid: { label: "Avoid", tone: "muted" },
     risk: { label: "Risk review", tone: "risk" },
   };
@@ -165,23 +241,58 @@
   function ltClass(v) {
     return v >= 90 ? "Exceptional" : v >= 80 ? "Strong" : v >= 70 ? "Attractive" : v >= 60 ? "Fair" : v >= 50 ? "Weak" : "Unattractive";
   }
+  const valFrac = (lt) => (lt.cats && lt.cats.C[1] ? lt.cats.C[0] / lt.cats.C[1] : null);
+
+  // Long-term signal for a stock: the model's own call, then the portfolio rules.
+  function ltSig(s) {
+    const lt = s.lt;
+    const h = P && P.held.get(s.symbol);
+    if (h) {
+      const sec = P.sectors[s.sector] || 0;
+      if (!lt || lt.score == null) return { kind: "holdOwned", why: ["there isn't enough filing data to score it, so watch it yourself"] };
+      if (lt.flags.length) return { kind: "exit", why: lt.flags };
+      if (lt.score < 50) return { kind: "exit", why: [`its score has fallen to ${fmtNum(lt.score, 0)}`] };
+      if (h.weight > POS_CAP) return { kind: "trim", why: [`it is ${fmtNum(h.weight, 1)}% of your portfolio, above the ${POS_CAP}% cap`] };
+      if (lt.mos != null && lt.mos <= -60) return { kind: "trim", why: [`the price is ${fmtNum(-lt.mos, 0)}% above the fair-value estimate`] };
+      const cheap = (valFrac(lt) != null && valFrac(lt) >= 0.6) || (lt.mos != null && lt.mos >= 10);
+      if (lt.score >= 80 && cheap && h.weight + 1 <= POS_CAP && sec + 1 <= SECTOR_CAP) {
+        return { kind: "accumulate", why: [`score ${fmtNum(lt.score, 0)}`, "still attractively valued", `${fmtNum(POS_CAP - h.weight, 1)} points of room under the position cap`] };
+      }
+      const why = [];
+      if (lt.score < 80) why.push(`the score is ${fmtNum(lt.score, 0)} (adding needs 80)`);
+      else if (!cheap) why.push("the price isn't attractive enough to add more");
+      else why.push("there's no room left under the position or sector cap");
+      return { kind: "holdOwned", why };
+    }
+    if (!lt || !lt.signal || lt.signal === "nodata") return null;
+    if (lt.signal === "buy" && hasPf()) {
+      const secAfter = (P.sectors[s.sector] || 0) + STARTER;
+      if (secAfter > SECTOR_CAP) return { kind: "watch", why: [`a starter position would put ${s.sector} at ${fmtNum(secAfter, 0)}% of your portfolio, over the ${SECTOR_CAP}% cap`] };
+    }
+    return { kind: lt.signal, why: [] };
+  }
+
   // The signal shown for a stock under the current horizon.
   function sigOf(s) {
     if (state.horizon === "short") {
       return s.setup ? { kind: s.setup.kind, label: SETUP_LABELS[s.setup.kind], tone: s.setup.kind === "hot" ? "warn" : "buy" } : null;
     }
-    const k = s.lt && s.lt.signal;
-    return k && LT_SIGNALS[k] ? { kind: k, ...LT_SIGNALS[k] } : null;
+    const sig = ltSig(s);
+    return sig ? { kind: sig.kind, ...LT_SIGNALS[sig.kind] } : null;
   }
   // Plain-language reading of a 0-100 sub-score.
   const grade = (v) => (v == null ? "not enough data" : v >= 80 ? "great" : v >= 65 ? "good" : v >= 50 ? "so-so" : "weak");
 
-  function ltExplain(s) {
+  // The long-term story in plain language; shared by the Why? popover and the detail view.
+  function ltNarrative(s) {
     const lt = s.lt;
-    const sig = LT_SIGNALS[lt.signal];
+    const sig = ltSig(s) || { kind: lt.signal, why: [] };
+    const k = sig.kind;
     const metric = (id) => lt.m.find((m) => m[0] === id);
-    const best = lt.m.filter((m) => m[2] != null && m[2] === m[3] && m[1] !== "F").slice(0, 2).map((m) => m[4]);
-    const worst = lt.m.filter((m) => m[2] === 0 && m[1] !== "F").slice(0, 2).map((m) => m[4]);
+    // Only business measures answer "is it a good business?"; price and trend have their own questions.
+    const isBiz = (m) => m.length === 5 && "ABDE".includes(m[1]);
+    const best = lt.m.filter((m) => isBiz(m) && m[2] != null && m[2] === m[3]).slice(0, 2).map((m) => m[4]);
+    const worst = lt.m.filter((m) => isBiz(m) && m[2] === 0).slice(0, 2).map((m) => m[4]);
     const fv = lt.fv;
     const price = s.price;
 
@@ -204,51 +315,77 @@
     const timing = `The price trend is <b>${trendUp >= 2 ? "pointing up" : trendUp === 1 ? "mixed" : "pointing down"}</b> (${trendBits.map((m) => esc(m[4])).join("; ")}). ` +
       "For a long-term owner this matters least; a dip can be a chance to buy a good business cheaper.";
 
+    const because = sig.why.length ? ` Why: ${sig.why.map(esc).join("; ")}.` : "";
     let plan;
-    if (lt.signal === "buy") {
-      plan = `Passes every buy check (score ≥ 85, valuation ≥ 14/20, ≥ 20% below fair value). A <b>3–10 year</b> idea: start small (2–3% of your portfolio), add while the business keeps performing, and don't sell just because the price drops.`;
-    } else if (lt.signal === "watch") {
-      const why = [];
-      if (lt.score < 85) why.push(`the score is ${fmtNum(lt.score, 0)} (a buy needs 85)`);
-      if (lt.cats.C[1] && lt.cats.C[0] / lt.cats.C[1] < 0.7) why.push("the valuation checks aren't strong enough");
-      if (lt.mos == null || lt.mos < 20) why.push("the price isn't 20% below fair value yet");
-      plan = `A good business to keep an eye on, but not a buy today because ${why.join(" and ") || "it narrowly misses a buy check"}.` +
+    if (k === "buy") {
+      plan = `Passes every buy check (score ≥ 85, valuation ≥ 14/20, ≥ 20% below fair value${hasPf() ? ", fits your sector cap" : ""}). A <b>3–10 year</b> idea: start small (2–3% of your portfolio), add while the business keeps performing, and don't sell just because the price drops.`;
+    } else if (k === "accumulate") {
+      plan = `You own it and it still earns its place: you could <b>add a little more</b> while staying under the ${POS_CAP}% position cap.${because}`;
+    } else if (k === "holdOwned") {
+      plan = `You own it and nothing has broken, so <b>holding</b> is reasonable. Don't add more right now.${because}`;
+    } else if (k === "exit") {
+      plan = `You own it, and something important has changed: <b>review whether your reason for owning it still holds</b>.${because} An exit review isn't an automatic sale; think about taxes and whether the story has really changed.`;
+    } else if (k === "watch") {
+      const why = [...sig.why];
+      if (!why.length) {
+        if (lt.score < 85) why.push(`the score is ${fmtNum(lt.score, 0)} (a buy needs 85)`);
+        if (valFrac(lt) != null && valFrac(lt) < 0.7) why.push("the valuation checks aren't strong enough");
+        if (lt.mos == null || lt.mos < 20) why.push("the price isn't 20% below fair value yet");
+      }
+      plan = `A good business to keep an eye on, but not a buy today because ${why.map(esc).join(" and ") || "it narrowly misses a buy check"}.` +
         (lt.entry && lt.entry < price ? ` A more attractive entry would be around <b>$${fmtNum(lt.entry, 2)}</b> or lower.` : "");
-    } else if (lt.signal === "hold") {
+    } else if (k === "hold") {
       plan = "A fair business at a fair-ish price. If you already own it and nothing has broken, holding is reasonable. Not a priority for new money.";
-    } else if (lt.signal === "trim") {
-      plan = `Decent business, but the price is far above the fair-value estimate. If you own a lot of it, consider trimming back toward your normal position size. That's a review, not an automatic sale: think about taxes and whether the story has really changed.`;
-    } else if (lt.signal === "risk") {
+    } else if (k === "trim") {
+      plan = `${P && P.held.has(s.symbol) ? "You own it, but" : "Decent business, but"} it's time to <b>consider trimming</b> back toward a normal position size.${because || " Why: the price is far above the fair-value estimate."} That's a review, not an automatic sale: think about taxes and whether the story has really changed.`;
+    } else if (k === "risk") {
       plan = `Blocked from any buy signal by a red flag: ${lt.flags.map(esc).join("; ")}. If you own it, check whether the reason you bought it still holds.`;
     } else {
       plan = "The numbers don't make a strong case right now. Avoid new buying until the business or the price improves.";
     }
     const changes = [];
-    if (lt.signal === "buy" || lt.signal === "watch" || lt.signal === "hold") {
+    if (["buy", "watch", "hold", "accumulate", "holdOwned"].includes(k)) {
       changes.push("revenue growth slowing below 5% a year", "returns on capital falling below 10%", "debt climbing above 3× EBITDA");
       if (fv) changes.push(`the price rising above $${fmtNum(fv[1], 2)} (no more discount)`);
-    } else if (lt.signal === "risk") {
+    } else if (k === "risk" || k === "exit") {
       changes.push("the red flags clearing in the next annual report");
     } else {
       changes.push("stronger profits or cash flow in the next annual report", fv ? `the price falling toward $${fmtNum(lt.entry, 2)}` : "positive free cash flow");
     }
+    let mine = "";
+    if (hasPf()) {
+      const h = P.held.get(s.symbol);
+      const sec = P.sectors[s.sector] || 0;
+      mine = h
+        ? `You own ${fmtNum(h.shares, 0)} shares: ${fmtNum(h.weight, 1)}% of your portfolio (cap ${POS_CAP}%). ${esc(s.sector)} is ${fmtNum(sec, 0)}% (cap ${SECTOR_CAP}%).`
+        : `You don't own it. A ${STARTER}% starter position would bring ${esc(s.sector)} to ${fmtNum(sec + STARTER, 0)}% of your portfolio (cap ${SECTOR_CAP}%). Portfolio Fit: <b>${fmtNum(s.fit, 0)}/100</b>.`;
+    }
+    return { kind: k, label: LT_SIGNALS[k].label, business, pricePara, timing, plan, changes, mine };
+  }
 
-    const bars = LT_CATS.map(([k, name]) => {
-      const [earned, avail, mx] = lt.cats[k];
+  function catBars(lt) {
+    return LT_CATS.map(([k, name]) => {
+      const [earned, avail] = lt.cats[k];
       const w = avail ? Math.round((earned / avail) * 100) : 0;
       return `<div class="cat"><span>${name}</span><span class="cat-bar"><i style="width:${w}%"></i></span><span class="cat-v">${avail ? `${fmtNum(earned, 1)}/${avail}` : "n/a"}</span></div>`;
     }).join("");
+  }
+  const ltNote = (lt) => `Based on SEC filings through fiscal year ending ${esc(lt.fy)} and prices from ${esc(state.data.asOf)}. ${lt.cov}% of the model's points could be measured; analyst forecasts and judgment calls like moat and management aren't included. The score ranks stocks; a 90 does not mean a 90% chance of making money. Not financial advice.`;
 
+  function ltExplain(s) {
+    const lt = s.lt;
+    const n = ltNarrative(s);
     return `
-      <div class="ex-head"><span class="badge ${lt.signal}">${sig.label}</span><b>${esc(s.symbol)}</b><span class="ex-name">${esc(s.name)}</span></div>
+      <div class="ex-head"><span class="badge ${n.kind}">${n.label}</span><b>${esc(s.symbol)}</b><span class="ex-name">${esc(s.name)}</span></div>
       <div class="ex-score"><b>${fmtNum(lt.score, 0)}</b><span>/100 · ${ltClass(lt.score)}</span></div>
-      <div class="cats">${bars}</div>
-      <p class="ex-k">1. Is it a good business?</p><p>${business}</p>
-      <p class="ex-k">2. Is it a good price?</p><p>${pricePara}</p>
-      <p class="ex-k">3. Is now a good time?</p><p>${timing}</p>
-      <p class="ex-k">What to do</p><p>${plan}</p>
-      <p class="ex-k">What would change this</p><p>${changes.map(esc).join("; ")}.</p>
-      <p class="ex-note">Based on SEC filings through fiscal year ending ${esc(lt.fy)} and prices from ${esc(state.data.asOf)}. ${lt.cov}% of the model's points could be measured; analyst forecasts and judgment calls like moat and management aren't included. The score ranks stocks; a 90 does not mean a 90% chance of making money. Not financial advice.</p>`;
+      <div class="cats">${catBars(lt)}</div>
+      <p class="ex-k">1. Is it a good business?</p><p>${n.business}</p>
+      <p class="ex-k">2. Is it a good price?</p><p>${n.pricePara}</p>
+      <p class="ex-k">3. Is now a good time?</p><p>${n.timing}</p>
+      <p class="ex-k">What to do</p><p>${n.plan}</p>
+      ${n.mine ? `<p class="ex-k">Your portfolio</p><p>${n.mine}</p>` : ""}
+      <p class="ex-k">What would change this</p><p>${n.changes.map(esc).join("; ")}.</p>
+      <p class="ex-note">${ltNote(lt)} Click the row for charts and every metric.</p>`;
   }
 
   const explainBox = $("explain");
@@ -258,7 +395,7 @@
     const s = state.data.stocks.find((x) => x.symbol === btn.dataset.sym);
     if (!s) return;
     if (state.horizon === "long") {
-      if (!s.lt || !s.lt.signal || s.lt.signal === "nodata") return;
+      if (!s.lt || s.lt.score == null) return;
       explainBox.innerHTML = ltExplain(s);
       return openExplain(btn);
     }
@@ -298,6 +435,292 @@
     explainFor = null;
   }
 
+  // ---------- render: my portfolio ----------
+  function renderPortfolio() {
+    const body = $("pf-body");
+    $("pf-cash").value = pf.cash ? pf.cash : "";
+    if (!hasPf()) {
+      body.innerHTML = `<div class="pf-empty">
+        <p><b>Add what you own</b> to turn the long-term signals personal:</p>
+        <ul>
+          <li><b>Accumulate / Hold / Trim / Exit</b> calls for each of your stocks</li>
+          <li>Alerts when one stock passes ${POS_CAP}% of your money, a sector passes ${SECTOR_CAP}%, or your holdings fall 10%, 15% or 20% from their high</li>
+          <li>A <b>Portfolio Fit</b> score on every stock: would buying it keep you diversified and inside your limits?</li>
+        </ul></div>`;
+      return;
+    }
+    const alerts = [];
+    for (const r of P.rows) {
+      if (!r.s) alerts.push(["warn", `${r.sym} isn't in today's data (not listed or under $300M), so it has no price.`]);
+      if (r.weight > POS_CAP) alerts.push(["warn", `${r.sym} is ${fmtNum(r.weight, 1)}% of your portfolio, above the ${POS_CAP}% cap.`]);
+      const sig = r.s && ltSig(r.s);
+      if (sig && sig.kind === "exit") alerts.push(["risk", `${r.sym}: exit review (${sig.why.join("; ")}).`]);
+    }
+    for (const [sec, w] of Object.entries(P.sectors)) if (w > SECTOR_CAP) alerts.push(["warn", `${sec} is ${fmtNum(w, 0)}% of your portfolio, above the ${SECTOR_CAP}% sector cap.`]);
+    if (P.spec > SPEC_CAP) alerts.push(["warn", `${fmtNum(P.spec, 1)}% is in speculative holdings (no score or score under 50), above the ${SPEC_CAP}% limit.`]);
+    if (P.dd != null && P.dd <= -10) {
+      const lvl = P.dd <= -20 ? 20 : P.dd <= -15 ? 15 : 10;
+      alerts.push([lvl >= 20 ? "risk" : "warn", `Your holdings are ${fmtNum(-P.dd, 1)}% below their 1-year high (past the −${lvl}% alert). Check each business, not just the price.`]);
+    }
+    const stats = [
+      ["Value", "$" + fmtNum(P.total, 0), pf.cash ? `incl. $${fmtNum(pf.cash, 0)} cash` : `${P.rows.length} positions`],
+      ["Gain / loss", P.gain == null ? "—" : (P.gain >= 0 ? "+$" : "−$") + fmtNum(Math.abs(P.gain), 0), P.gainPct == null ? "add average cost to see this" : fmtPct(P.gainPct) + " on cost", P.gain == null ? "" : retClass(P.gain)],
+      ["From 1-year high", P.dd == null ? "—" : fmtPct(P.dd), "alerts at −10%, −15%, −20%", P.dd != null && P.dd <= -10 ? "down" : ""],
+      ["Alerts", String(alerts.length), alerts.length ? "see below" : "all limits respected", alerts.length ? "down" : "up"],
+    ];
+    const rows = [...P.rows].sort((a, b) => (b.value || 0) - (a.value || 0)).map((r) => {
+      const sig = r.s && ltSig(r.s);
+      const badge = sig ? `<span class="badge ${sig.kind}">${LT_SIGNALS[sig.kind].label}</span>` : "";
+      return `<tr data-sym="${esc(r.sym)}">
+        <td class="l sym">${esc(r.sym)}</td><td>${fmtNum(r.shares, r.shares % 1 ? 2 : 0)}</td>
+        <td>${r.value == null ? "—" : "$" + fmtNum(r.value, 0)}</td>
+        <td class="${r.weight > POS_CAP ? "down" : ""}">${fmtNum(r.weight, 1)}%</td>
+        <td class="${retClass(r.gain)}">${r.gainPct == null ? "—" : fmtPct(r.gainPct)}</td>
+        <td class="l">${badge}</td>
+        <td><button type="button" class="pf-rm" data-sym="${esc(r.sym)}" aria-label="Remove ${esc(r.sym)}">Remove</button></td></tr>`;
+    }).join("");
+    body.innerHTML = `
+      <div class="pf-stats">${stats.map(([l, v, n, c]) => `<div class="tile"><div class="label">${l}</div><div class="value ${c || ""}">${esc(v)}</div><div class="note">${esc(n)}</div></div>`).join("")}</div>
+      ${alerts.length ? `<ul class="pf-alerts">${alerts.map(([t, m]) => `<li class="${t}"><span class="badge ${t === "risk" ? "risk" : "trim"}">${t === "risk" ? "Review" : "Limit"}</span>${esc(m)}</li>`).join("")}</ul>` : ""}
+      <div class="grid2 pf-grid">
+        <div class="table-wrap"><table class="pf-table">
+          <thead><tr><th class="l">Ticker</th><th>Shares</th><th>Value</th><th>Weight</th><th>Gain</th><th class="l">Signal</th><th></th></tr></thead>
+          <tbody>${rows}</tbody></table></div>
+        <figure class="pf-sectors"><figcaption><h3>Sector exposure</h3><p class="hint">Dashed line = ${SECTOR_CAP}% cap</p></figcaption><div id="chart-pf" class="chart"></div></figure>
+      </div>`;
+    const secs = Object.entries(P.sectors).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label: label.length > 22 ? label.slice(0, 21) + "…" : label, value, full: label }));
+    barChart($("chart-pf"), secs, {
+      aria: "Portfolio weight by sector",
+      labelW: 150,
+      ref: SECTOR_CAP,
+      tickFmt: (t) => t + "%",
+      tip: (d) => `<div class="t">${esc(d.full)}</div><div class="r"><span>Share of portfolio</span><b>${fmtNum(d.value, 1)}%</b></div><div class="r"><span>Cap</span><b>${SECTOR_CAP}%</b></div>`,
+    });
+  }
+
+  function upsertPosition(sym, shares, cost) {
+    const i = pf.positions.findIndex((p) => p.sym === sym);
+    const rec = { sym, shares, cost: cost || (i >= 0 ? pf.positions[i].cost : null) };
+    if (i >= 0) pf.positions[i] = rec; else pf.positions.push(rec);
+    savePf();
+  }
+  function portfolioChanged() {
+    computePf();
+    render();
+  }
+
+  // ---------- detail view ----------
+  const detail = $("detail");
+  let history = null; // weekly long-term scores, loaded on first use
+
+  async function loadHistory() {
+    if (history) return history;
+    const el = document.getElementById("history-data");
+    try {
+      history = el ? JSON.parse(el.textContent) : await (await fetch("data/score_history.json", { cache: "no-cache" })).json();
+    } catch {
+      history = { dates: [], scores: {} };
+    }
+    return history;
+  }
+
+  // Small vertical bar chart: one value per fiscal year, negatives in red.
+  function miniBars(el, labels, values, fmt) {
+    const W = Math.max(220, el.clientWidth), H = 150, L = 46, R = 6, T = 10, B = 22;
+    const vals = values.map((v) => (v == null ? null : v));
+    const present = vals.filter((v) => v != null);
+    if (!present.length) { el.innerHTML = `<p class="hint">Not reported</p>`; return; }
+    const { ticks, lo, hi } = niceTicks(Math.min(0, ...present), Math.max(0, ...present), 4);
+    const sy = (v) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
+    const bw = (W - L - R) / vals.length;
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+    for (const t of ticks) svg += `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${sy(t)}" y2="${sy(t)}"/><text x="${L - 6}" y="${sy(t) + 4}" text-anchor="end">${esc(fmt(t, true))}</text>`;
+    vals.forEach((v, i) => {
+      const x = L + i * bw;
+      svg += `<text x="${x + bw / 2}" y="${H - 6}" text-anchor="middle">${esc(labels[i])}</text>`;
+      if (v == null) return;
+      const y0 = sy(0), y1 = sy(v);
+      svg += `<rect class="bar${v < 0 ? " neg" : ""}" x="${x + bw * 0.2}" y="${Math.min(y0, y1)}" width="${bw * 0.6}" height="${Math.max(1, Math.abs(y1 - y0))}" rx="3"/>`;
+      svg += `<rect class="hit" data-i="${i}" x="${x}" y="${T}" width="${bw}" height="${H - T - B}"/>`;
+    });
+    svg += `<line class="zero" x1="${L}" x2="${W - R}" y1="${sy(0)}" y2="${sy(0)}"/></svg>`;
+    el.innerHTML = svg;
+    el.querySelectorAll(".hit").forEach((h) => {
+      const i = +h.dataset.i;
+      h.addEventListener("mousemove", (e) => showTip(e, `<div class="t">FY${esc(labels[i])}</div><div class="r"><span>Value</span><b>${esc(fmt(vals[i]))}</b></div>`));
+      h.addEventListener("mouseleave", hideTip);
+    });
+  }
+
+  // Small line chart with optional shaded band (fair-value range) and reference line.
+  function miniLine(el, labels, values, fmt, opts = {}) {
+    const W = Math.max(220, el.clientWidth), H = opts.h || 150, L = 50, R = 8, T = 10, B = 22;
+    const present = values.filter((v) => v != null);
+    if (present.length < 2) { el.innerHTML = `<p class="hint">${esc(opts.empty || "Not enough data yet")}</p>`; return; }
+    const extra = opts.band ? [opts.band[0], opts.band[1]] : [];
+    if (opts.ref != null) extra.push(opts.ref);
+    let lo = Math.min(...present, ...extra), hi = Math.max(...present, ...extra);
+    if (opts.zero) { lo = Math.min(0, lo); hi = Math.max(0, hi); }
+    const nt = niceTicks(lo, hi, 4);
+    const sx = (i) => L + (i / (values.length - 1)) * (W - L - R);
+    const sy = (v) => T + (1 - (v - nt.lo) / (nt.hi - nt.lo || 1)) * (H - T - B);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" role="img">`;
+    for (const t of nt.ticks) svg += `<line class="grid-line" x1="${L}" x2="${W - R}" y1="${sy(t)}" y2="${sy(t)}"/><text x="${L - 6}" y="${sy(t) + 4}" text-anchor="end">${esc(fmt(t, true))}</text>`;
+    if (opts.band) {
+      const [a, b] = opts.band;
+      svg += `<rect class="band" x="${L}" width="${W - L - R}" y="${sy(b)}" height="${Math.max(1, sy(a) - sy(b))}"/>`;
+    }
+    if (opts.ref != null) svg += `<line class="refline" x1="${L}" x2="${W - R}" y1="${sy(opts.ref)}" y2="${sy(opts.ref)}"/><text class="reflabel" x="${W - R - 4}" y="${sy(opts.ref) - 5}" text-anchor="end">${esc(opts.refLabel || "")}</text>`;
+    const step = Math.max(1, Math.ceil(labels.length / 5));
+    labels.forEach((lab, i) => {
+      if (i % step && i !== labels.length - 1) return;
+      if (i !== labels.length - 1 && labels.length - 1 - i < step / 2) return; // keep clear of the last label
+      const anchor = i === 0 ? "start" : i === labels.length - 1 ? "end" : "middle";
+      svg += `<text x="${sx(i)}" y="${H - 6}" text-anchor="${anchor}">${esc(lab)}</text>`;
+    });
+    let d = "";
+    values.forEach((v, i) => { if (v == null) return; d += `${d ? "L" : "M"}${sx(i).toFixed(1)},${sy(v).toFixed(1)}`; });
+    svg += `<path class="line" d="${d}"/>`;
+    const lastI = values.map((v, i) => (v == null ? -1 : i)).reduce((a, b) => Math.max(a, b), -1);
+    svg += `<circle class="dot" cx="${sx(lastI)}" cy="${sy(values[lastI])}" r="4"/>`;
+    const bw = (W - L - R) / Math.max(1, values.length - 1);
+    values.forEach((v, i) => { if (v != null) svg += `<rect class="hit" data-i="${i}" x="${sx(i) - bw / 2}" y="${T}" width="${bw}" height="${H - T - B}"/>`; });
+    svg += `</svg>`;
+    el.innerHTML = svg;
+    el.querySelectorAll(".hit").forEach((h) => {
+      const i = +h.dataset.i;
+      h.addEventListener("mousemove", (e) => showTip(e, `<div class="t">${esc(opts.tipLabel ? opts.tipLabel(i) : labels[i])}</div><div class="r"><span>${esc(opts.name || "Value")}</span><b>${esc(fmt(values[i]))}</b></div>`));
+      h.addEventListener("mouseleave", hideTip);
+    });
+  }
+
+  const fmtM = (v, axis) => {
+    if (v == null) return "—";
+    const a = Math.abs(v);
+    const s = a >= 1e6 ? (v / 1e6).toFixed(axis ? 0 : 1) + "T" : a >= 1e3 ? (v / 1e3).toFixed(axis ? 0 : 1) + "B" : v.toFixed(0) + "M";
+    return (v < 0 ? "−$" : "$") + s.replace("-", "");
+  };
+  const fmtP = (v) => (v == null ? "—" : `${v < 0 ? "−" : ""}${Math.abs(v).toFixed(Math.abs(v) >= 10 ? 0 : 1)}%`);
+  const fmtD = (v) => (v == null ? "—" : "$" + fmtNum(v, v >= 100 ? 0 : 2));
+
+  async function openDetail(sym) {
+    const s = bySym.get(sym);
+    if (!s) return;
+    hideExplain();
+    const lt = s.lt && s.lt.score != null ? s.lt : null;
+    const n = lt ? ltNarrative(s) : null;
+    const sig = ltSig(s);
+    const h = P && P.held.get(sym);
+    const sec = `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${s.lt && s.lt.cik ? s.lt.cik : encodeURIComponent(sym)}&type=10-K&dateb=&owner=include&count=40`;
+    const statusIcon = (m) => (m.length > 5 ? `<span class="st skip" title="not used">–</span>` : m[2] == null ? `<span class="st na" title="no data">?</span>` : m[2] === m[3] ? `<span class="st full" title="full points">✓</span>` : m[2] > 0 ? `<span class="st half" title="half points">½</span>` : `<span class="st zero" title="no points">✗</span>`);
+    const metricRows = lt ? LT_CATS.map(([c, name]) => {
+      const rows = lt.m.filter((m) => m[1] === c);
+      return `<tr class="grp"><th class="l" colspan="2">${name}</th><th>${lt.cats[c][1] ? `${fmtNum(lt.cats[c][0], 1)} / ${lt.cats[c][1]}` : "n/a"}</th></tr>` +
+        rows.map((m) => `<tr class="${m.length > 5 ? "skip" : ""}"><td>${statusIcon(m)}</td><td class="l">${esc(m[4])}</td><td>${m.length > 5 ? "not used" : m[2] == null ? "no data" : `${fmtNum(m[2], m[2] % 1 ? 1 : 0)} / ${m[3]}`}</td></tr>`).join("");
+    }).join("") : "";
+
+    $("detail-body").innerHTML = `
+      <header class="d-head">
+        <div>
+          <h2 id="d-title">${esc(s.symbol)} <span>${esc(s.name)}</span></h2>
+          <p class="hint">${esc(s.sector)} · ${fmtCap(s.marketCap)} · $${fmtNum(s.price, 2)} on ${esc(state.data.asOf)}${h ? ` · you own ${fmtNum(h.shares, h.shares % 1 ? 2 : 0)} shares (${fmtNum(h.weight, 1)}%)` : ""}</p>
+          <p class="d-links"><a href="${yahoo(sym)}" target="_blank" rel="noopener">Yahoo Finance ↗</a><a href="${sec}" target="_blank" rel="noopener">SEC filings ↗</a></p>
+        </div>
+        <button type="button" class="d-close btn" autofocus>Close</button>
+      </header>
+      ${lt ? `
+      <div class="d-grid">
+        <section class="d-card d-score">
+          <div class="ex-head">${sig ? `<span class="badge ${sig.kind}">${LT_SIGNALS[sig.kind].label}</span>` : ""}</div>
+          <div class="ex-score"><b>${fmtNum(lt.score, 0)}</b><span>/100 · ${ltClass(lt.score)}</span></div>
+          <div class="d-subs">
+            <div><span>Quality</span><b>${fmtNum(lt.quality, 0)}</b></div>
+            <div><span>Value</span><b>${fmtNum(lt.value, 0)}</b></div>
+            <div><span>Portfolio fit</span><b>${s.fit == null ? "—" : fmtNum(s.fit, 0)}</b></div>
+          </div>
+          <div class="cats">${catBars(lt)}</div>
+          ${lt.flags.length ? `<p class="d-flags"><span class="badge risk">Red flags</span> ${lt.flags.map(esc).join("; ")}</p>` : ""}
+          ${lt.warns.length ? `<p class="d-flags"><span class="badge trim">Note</span> ${lt.warns.map(esc).join("; ")}</p>` : ""}
+        </section>
+        <section class="d-card">
+          <h3>Price vs. fair value</h3>
+          <p class="hint">Weekly closes, past year${lt.fv ? ` · shaded = bear $${fmtNum(lt.fv[0], 2)} to bull $${fmtNum(lt.fv[2], 2)} · dashed = base $${fmtNum(lt.fv[1], 2)}` : ""}</p>
+          <div class="chart" id="d-price"></div>
+        </section>
+        <section class="d-card">
+          <h3>Long-term score history</h3>
+          <p class="hint">One reading per week</p>
+          <div class="chart" id="d-hist"></div>
+        </section>
+        <section class="d-card d-wide">
+          <h3>Financials by fiscal year</h3>
+          <div class="d-fin">
+            <figure><figcaption>Revenue</figcaption><div class="chart" id="d-rev"></div></figure>
+            <figure><figcaption>Free cash flow</figcaption><div class="chart" id="d-fcf"></div></figure>
+            <figure><figcaption>Operating margin</figcaption><div class="chart" id="d-opm"></div></figure>
+            <figure><figcaption>${esc(lt.fin ? lt.fin.roicLabel : "ROIC")}</figcaption><div class="chart" id="d-roic"></div></figure>
+          </div>
+        </section>
+        <section class="d-card d-wide d-story">
+          <h3>Investment thesis</h3>
+          <p class="ex-k">1. Is it a good business?</p><p>${n.business}</p>
+          <p class="ex-k">2. Is it a good price?</p><p>${n.pricePara}</p>
+          <p class="ex-k">3. Is now a good time?</p><p>${n.timing}</p>
+          <p class="ex-k">What to do</p><p>${n.plan}</p>
+          ${n.mine ? `<p class="ex-k">Your portfolio</p><p>${n.mine}</p>` : ""}
+          <p class="ex-k">What would change this</p><p>${n.changes.map(esc).join("; ")}.</p>
+        </section>
+        <section class="d-card d-wide">
+          <h3>Every metric</h3>
+          <p class="hint">✓ full points · ½ half · ✗ none · ? no data · – not used for this company</p>
+          <div class="table-wrap"><table class="d-metrics"><tbody>${metricRows}</tbody></table></div>
+        </section>
+      </div>
+      <p class="ex-note">${ltNote(lt)}</p>` : `
+      <div class="d-grid">
+        <section class="d-card d-wide">
+          <h3>Price, past year</h3>
+          <div class="chart" id="d-price"></div>
+          <p class="hint">There isn't enough recent US-GAAP filing data to score this company for the long term (common for foreign filers, new listings and some funds).</p>
+        </section>
+      </div>`}`;
+
+    // Tooltips must live inside the dialog to appear above it.
+    detail.appendChild(tip);
+    if (!detail.open) detail.showModal();
+    detail.scrollTop = 0;
+
+    // Weekly price labels: count back from the last close.
+    const asOf = new Date(state.data.asOf + "T00:00:00");
+    const spark = s.spark || [];
+    const weekLabel = (i, long) => {
+      const d = new Date(asOf);
+      d.setDate(d.getDate() - 7 * (spark.length - 1 - i));
+      return d.toLocaleDateString(undefined, long ? { month: "short", day: "numeric", year: "numeric" } : { month: "short" });
+    };
+    miniLine($("d-price"), spark.map((_, i) => weekLabel(i)), spark, fmtD, {
+      h: 180, name: "Close", tipLabel: (i) => "Week of " + weekLabel(i, true),
+      band: lt && lt.fv ? [lt.fv[0], lt.fv[2]] : null, ref: lt && lt.fv ? lt.fv[1] : null, refLabel: lt && lt.fv ? "fair value" : "",
+    });
+    if (!lt) return;
+    const f = lt.fin || { fy: [], rev: [], fcf: [], opm: [], roic: [] };
+    miniBars($("d-rev"), f.fy, f.rev, fmtM);
+    miniBars($("d-fcf"), f.fy, f.fcf, fmtM);
+    miniLine($("d-opm"), f.fy, f.opm, fmtP, { zero: true, name: "Operating margin" });
+    miniLine($("d-roic"), f.fy, f.roic, fmtP, { zero: true, ref: 15, refLabel: "15% target", name: f.roicLabel });
+    const hist = await loadHistory();
+    const col = hist.scores[sym] || [];
+    const dates = hist.dates.slice(-col.length);
+    miniLine($("d-hist"), dates.map((d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })), col, (v) => fmtNum(v, 0), {
+      name: "Score", empty: `History starts ${hist.dates[0] || "this week"}; a line appears after the second weekly reading.`,
+    });
+  }
+  function closeDetail() {
+    hideTip();
+    document.body.appendChild(tip);
+    if (detail.open) detail.close();
+  }
+
   // ---------- data pipeline ----------
   function filtered() {
     const q = state.q.trim().toLowerCase();
@@ -311,7 +734,9 @@
   }
   function matchesSignal(s, want) {
     const sig = sigOf(s);
+    if (want === "held") return !!(P && P.held.has(s.symbol));
     if (!sig) return false;
+    if (want === "hold") return sig.kind === "hold" || sig.kind === "holdOwned";
     return want === "buy" ? sig.tone === "buy" : sig.kind === want;
   }
   function byMetric(rows, key, dir = -1) {
@@ -366,7 +791,8 @@
       return;
     }
     const values = items.map((d) => d.value);
-    const { ticks, lo, hi } = niceTicks(Math.min(0, ...values), Math.max(0, ...values), Math.max(2, Math.floor((width - labelW) / 90)));
+    const refs = opts.ref != null ? [opts.ref] : [];
+    const { ticks, lo, hi } = niceTicks(Math.min(0, ...values, ...refs), Math.max(0, ...values, ...refs), Math.max(2, Math.floor((width - labelW) / 90)));
     const x0 = labelW, x1 = width - right;
     const sx = (v) => x0 + ((v - lo) / (hi - lo || 1)) * (x1 - x0);
     const zero = sx(0);
@@ -391,6 +817,7 @@
       svg += `<path class="bar${neg && opts.diverging ? " neg" : ""}" d="${path}"/>`;
       svg += `<rect class="hit" data-i="${i}" x="0" y="${y}" width="${width}" height="${rowH}"/>`;
     });
+    if (opts.ref != null) svg += `<line class="refline" x1="${sx(opts.ref)}" x2="${sx(opts.ref)}" y1="${top}" y2="${plotBottom}"/>`;
     svg += `<line class="zero" x1="${zero}" x2="${zero}" y1="${top}" y2="${plotBottom}"/></svg>`;
     el.innerHTML = svg;
     el.querySelectorAll(".hit").forEach((h) => {
@@ -444,12 +871,12 @@
 
   function syncSignalOptions() {
     const opts = state.horizon === "long"
-      ? [["", "All stocks"], ["buy", "Buy review"], ["watch", "Watchlist"], ["hold", "Hold / fair"], ["trim", "Trim review"], ["avoid", "Avoid"], ["risk", "Risk review"]]
-      : [["", "All stocks"], ["buy", "Setups for next open"], ["breakout", "Breakouts"], ["dip", "Buy the dip"], ["hot", "Too hot (avoid chasing)"]];
+      ? [["", "All stocks"], ["held", "My holdings"], ["buy", "Buy review / Accumulate"], ["watch", "Watchlist"], ["hold", "Hold"], ["trim", "Trim review"], ["exit", "Exit review (owned)"], ["avoid", "Avoid"], ["risk", "Risk review"]]
+      : [["", "All stocks"], ["held", "My holdings"], ["buy", "Setups for next open"], ["breakout", "Breakouts"], ["dip", "Buy the dip"], ["hot", "Too hot (avoid chasing)"]];
     $("f-setup").innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
     $("f-setup").value = state.setup;
   }
-  const visibleColumns = () => COLUMNS.filter((c) => !c.only || c.only === state.horizon);
+  const visibleColumns = () => COLUMNS.filter((c) => (!c.only || c.only === state.horizon) && (!c.need || c.need()));
 
   function renderTable(rows) {
     const COLUMNS = visibleColumns();
@@ -476,7 +903,7 @@
           }
           const v = s[c.key];
           if (c.ret) return `<td class="${retClass(v)}">${fmtPct(v)}</td>`;
-          if (c.key === "symbol") return `<td class="${c.cls}"><a href="${yahoo(v)}" target="_blank" rel="noopener">${esc(v)}</a></td>`;
+          if (c.key === "symbol") return `<td class="${c.cls}"><a href="${yahoo(v)}" target="_blank" rel="noopener">${esc(v)}</a>${P && P.held.has(v) ? ` <span class="owned" title="In your portfolio">Owned</span>` : ""}</td>`;
           const text = c.fmt ? c.fmt(v) : v == null ? "—" : v;
           return `<td class="${c.cls || ""}"${c.key === "name" ? ` title="${esc(v)}"` : ""}>${esc(text)}</td>`;
         }).join("");
@@ -492,6 +919,7 @@
     renderTiles(rows);
     renderCharts(rows);
     renderTable(rows);
+    renderPortfolio();
   }
 
   // ---------- wiring ----------
@@ -552,8 +980,53 @@
       if (why) { explainFor === why && Date.now() - explainOpenedAt > 500 ? hideExplain() : showExplain(why); return; }
       if (e.target.closest("a")) return;
       const tr = e.target.closest("tr");
-      if (tr) window.open(yahoo(tr.dataset.sym), "_blank", "noopener");
+      if (tr && tr.dataset.sym) openDetail(tr.dataset.sym);
     });
+
+    // My portfolio
+    $("pf-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const sym = $("pf-sym").value.trim().toUpperCase();
+      const shares = +$("pf-shares").value;
+      const cost = +$("pf-cost").value || null;
+      const msg = $("pf-msg");
+      if (!bySym.has(sym)) {
+        msg.textContent = `${sym} isn't in today's list (US-listed stocks over $300M). Check the ticker.`;
+        msg.className = "pf-msg down";
+        return;
+      }
+      if (!(shares > 0)) {
+        msg.textContent = "Enter how many shares you own.";
+        msg.className = "pf-msg down";
+        return;
+      }
+      upsertPosition(sym, shares, cost);
+      msg.textContent = `Saved ${fmtNum(shares, shares % 1 ? 2 : 0)} ${sym}.`;
+      msg.className = "pf-msg up";
+      e.target.reset();
+      $("pf-sym").focus();
+      portfolioChanged();
+    });
+    $("pf-cash").addEventListener("change", (e) => { pf.cash = Math.max(0, +e.target.value || 0); savePf(); portfolioChanged(); });
+    $("pf-body").addEventListener("click", (e) => {
+      const rm = e.target.closest(".pf-rm");
+      if (rm) {
+        pf.positions = pf.positions.filter((p) => p.sym !== rm.dataset.sym);
+        savePf();
+        $("pf-msg").textContent = `Removed ${rm.dataset.sym}.`;
+        $("pf-msg").className = "pf-msg";
+        portfolioChanged();
+        return;
+      }
+      const tr = e.target.closest("tbody tr");
+      if (tr && tr.dataset.sym && bySym.has(tr.dataset.sym)) openDetail(tr.dataset.sym);
+    });
+
+    // Detail view
+    detail.addEventListener("click", (e) => {
+      if (e.target === detail || e.target.closest(".d-close")) closeDetail();
+    });
+    detail.addEventListener("close", () => { hideTip(); document.body.appendChild(tip); });
 
     let rt;
     window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => renderCharts(filtered()), 150); });
@@ -574,6 +1047,7 @@
     }
     const d = state.data;
     for (const s of d.stocks) {
+      bySym.set(s.symbol, s);
       s.setup = setupFor(s);
       const lt = s.lt || {};
       s.lts = lt.score ?? null;
@@ -588,6 +1062,9 @@
       $("f-horizon").value = "short";
       $("f-metric").value = "r1y";
     }
+    loadPf();
+    computePf();
+    $("pf-syms").innerHTML = d.stocks.map((s) => `<option value="${esc(s.symbol)}">${esc(s.name)}</option>`).join("");
     syncSignalOptions();
     $("asof").textContent = `${d.count.toLocaleString()} US stocks with market cap ≥ ${fmtCap(d.minMarketCap)} · prices as of ${d.asOf} · updated ${new Date(d.generatedAt).toLocaleString()}`;
     $("sample-banner").hidden = !d.sample;
