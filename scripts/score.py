@@ -33,6 +33,11 @@ FUNDAMENTALS = ROOT / "data" / "fundamentals.json"
 WEIGHTS = {"A": 25, "B": 20, "C": 20, "D": 15, "E": 10, "F": 10}
 QUALITY_CATS = ("A", "B", "D", "E")
 FULL, HALF, ZERO, NA = "full", "half", "zero", "na"
+# SKIP = the metric doesn't apply (EV/EBITDA for a bank) or no free source exists
+# for anyone (analyst forecasts). Its weight goes to the category's other
+# metrics. NA = the data exists in principle but this company didn't report it.
+SKIP = "skip"
+SPLIT_RATIOS = (2, 3, 4, 5, 6, 8, 10, 15, 20, 25, 30, 40, 50)
 
 TERMINAL_GROWTH = 0.025
 STALE_DAYS = 550  # latest annual report older than ~18 months
@@ -87,10 +92,12 @@ class Card:
 
     def add(self, mid: str, cat: str, mx: float, status: str, shown: str = ""):
         earned = {FULL: mx, HALF: mx / 2, ZERO: 0}.get(status)
-        self.metrics.append([mid, cat, earned, mx, shown])
+        self.metrics.append([mid, cat, earned, mx, shown] + ([1] if status == SKIP else []))
 
     def tiers(self, mid, cat, mx, value, full_if, half_if, shown, na=False):
-        if na or value is None:
+        if na:
+            self.add(mid, cat, mx, SKIP, shown)
+        elif value is None:
             self.add(mid, cat, mx, NA, shown)
         elif full_if(value):
             self.add(mid, cat, mx, FULL, shown)
@@ -100,7 +107,7 @@ class Card:
             self.add(mid, cat, mx, ZERO, shown)
 
     def category(self, cat: str):
-        rows = [m for m in self.metrics if m[1] == cat]
+        rows = [m for m in self.metrics if m[1] == cat and len(m) == 5]
         avail = sum(m[3] for m in rows if m[2] is not None)
         earned = sum(m[2] for m in rows if m[2] is not None)
         mx = sum(m[3] for m in rows)
@@ -109,6 +116,45 @@ class Card:
 
 
 # ---------- per-company derived series ----------
+def split_adjust(shares: list, eps: list, equity: list) -> tuple[list, list]:
+    """Undo stock splits in older filings, which report pre-split share counts.
+
+    A split multiplies the share count without bringing in money, so a jump in
+    shares with flat equity is treated as a split; a jump with rising equity is
+    real issuance and left alone.
+    """
+    shares, eps = list(shares), list(eps)
+
+    def snap(r):
+        k = min(SPLIT_RATIOS, key=lambda x: abs(x - r))
+        return k if abs(k - r) / k < 0.15 else None
+
+    for i in range(len(shares) - 1, 0, -1):
+        a, b = shares[i - 1], shares[i]
+        if not ok(a, b) or a <= 0 or b <= 0:
+            continue
+        r = b / a
+        er = equity[i] / equity[i - 1] if ok(equity[i], equity[i - 1]) and equity[i - 1] > 0 and equity[i] > 0 else None
+        k = None
+        if r >= 1.8 and (er is None or er < 1.3):
+            k = snap(r)
+        elif r <= 0.55 and (er is None or er > 0.75):
+            k = snap(1 / r)
+            k = 1 / k if k else None
+        if not k and (r >= 20 or r <= 0.05) and (er is None or not 0.2 < er / r < 5):
+            # A 20x jump that equity doesn't share is a units error in the filing.
+            if r >= 20:
+                shares[i - 1] = eps[i - 1] = None
+            else:
+                shares[i] = eps[i] = None
+            continue
+        if k:
+            for j in range(i):
+                shares[j] = shares[j] * k if ok(shares[j]) else None
+                eps[j] = eps[j] / k if ok(eps[j]) else None
+    return shares, eps
+
+
 def derive(f: dict) -> dict:
     n = len(f["fy"])
     g = lambda k: f.get(k) or [None] * n
@@ -117,6 +163,7 @@ def derive(f: dict) -> dict:
     equity, cash, sti = g("equity"), g("cash"), g("sti")
     pretax, tax = g("pretax"), g("tax")
 
+    shares, eps = split_adjust(shares, eps, equity)
     no_capex_tag = all(x is None for x in capex)
     fcf = [c - (0 if no_capex_tag else x) if ok(c) and (no_capex_tag or ok(x)) else None for c, x in zip(cfo, capex)]
 
@@ -149,7 +196,7 @@ def derive(f: dict) -> dict:
     return {
         "n": n, "rev": rev, "opinc": opinc, "netinc": netinc, "fcf": fcf, "debt": debt, "cash": cash_t,
         "equity": equity, "roic": roic, "ebitda": ebitda, "interest": interest, "gross": gross,
-        "eps": eps, "shares": shares, "assetsCur": g("assetsCur"), "liabCur": g("liabCur"),
+        "eps": eps, "shares": shares, "assetsCur": g("assetsCur"), "liabCur": g("liabCur"), "assets": g("assets"),
         "opm": [o / r if ok(o, r) and r > 0 else None for o, r in zip(opinc, rev)],
         "gm": [x / r if ok(x, r) and r > 0 else None for x, r in zip(gross, rev)],
         "roe": [x / e if ok(x, e) and e > 0 else None for x, e in zip(netinc, equity)],
@@ -197,6 +244,10 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
     roic5 = [x for x in tail(d["roic"], 5) if ok(x)]
     roic_med = statistics.median(roic5) if len(roic5) >= 3 else None
     c.tiers("roic", "A", 5, roic_med, lambda v: v >= 0.15, lambda v: v >= 0.10, f"5-yr median ROIC {pct(roic_med)}", na=fin)
+    if fin:
+        roa3 = [x / a for x, a in zip(tail(d["netinc"], 3), tail(d["assets"], 3)) if ok(x, a) and a > 0]
+        roa = sum(roa3) / len(roa3) if len(roa3) >= 2 else None
+        c.tiers("roa", "A", 5, roa, lambda v: v >= 0.010, lambda v: v >= 0.007, f"3-yr average return on assets {pct(roa, 2)}")
     fcf5 = [x for x in tail(d["fcf"], 5) if ok(x)]
     pos = sum(x > 0 for x in fcf5)
     c.tiers("fcfPos", "A", 5, (pos, len(fcf5)) if len(fcf5) >= 3 else None,
@@ -232,8 +283,8 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
             "turnaround: earnings were negative, growth rate not meaningful" if turnaround else f"{espan}-yr EPS growth {pct(eps_g)}/yr" if eps_g is not None else "EPS growth not measurable (losses)")
     fps_g, fspan = growth_over(d["fcfps"])
     c.tiers("fcfpsCagr", "B", 4, fps_g, lambda v: v >= 0.08, lambda v: v >= 0.04, f"{fspan}-yr free cash flow per share growth {pct(fps_g)}/yr" if fps_g is not None else "free cash flow per share growth not measurable", na=fin)
-    c.add("fwdRev", "B", 3, NA, "needs analyst forecasts (paid data)")
-    c.add("revisions", "B", 2, NA, "needs analyst forecasts (paid data)")
+    c.add("fwdRev", "B", 3, SKIP, "needs analyst forecasts (paid data)")
+    c.add("revisions", "B", 2, SKIP, "needs analyst forecasts (paid data)")
     sh_g, sspan = growth_over(d["shares"])
     c.tiers("shares", "B", 2, sh_g, lambda v: v <= 0.01, lambda v: v <= 0.03, f"share count change {pct(sh_g)}/yr" if sh_g is not None else "share count history unavailable")
 
@@ -286,22 +337,28 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
     c.tiers("moat", "D", 5, (hi, len(roic5)) if len(roic5) >= 3 else None,
             lambda v: v[0] >= min(4, v[1]), lambda v: v[0] >= v[1] - 2 and v[0] >= 2,
             f"ROIC ≥15% in {hi} of {len(roic5)} years (persistent high returns)", na=fin)
+    if fin:
+        roe5 = [x for x in tail(d["roe"], 5) if ok(x)]
+        hi_roe = sum(x >= 0.12 for x in roe5)
+        c.tiers("moatFin", "D", 5, (hi_roe, len(roe5)) if len(roe5) >= 3 else None,
+                lambda v: v[0] >= min(4, v[1]), lambda v: v[0] >= v[1] - 2 and v[0] >= 2,
+                f"ROE ≥12% in {hi_roe} of {len(roe5)} years (persistent high returns)")
     rank = sec.get("revRank", {}).get(s["symbol"])
     c.tiers("position", "D", 3, rank, lambda v: v <= 0.10, lambda v: v <= 0.25,
             (f"revenue in the top {math.ceil(rank * 100)}% of its sector" if rank <= 0.5 else "revenue in the bottom half of its sector")
             if rank is not None else "revenue rank unavailable")
-    c.add("recurring", "D", 3, NA, "needs filing text review (customer retention, contracts)")
+    c.add("recurring", "D", 3, SKIP, "needs filing text review (customer retention, contracts)")
     gm3 = tail(d["gm"], 3)
     if len(gm3) == 3 and all(ok(x) for x in gm3):
         steady = gm3[-1] >= gm3[0] - 0.02
         st = FULL if gm3[-1] >= 0.40 and steady else HALF if gm3[-1] >= 0.40 or (gm3[-1] >= 0.25 and steady) else ZERO
         c.add("pricing", "D", 2, st, f"gross margin {pct(gm3[-1])} ({'steady or rising' if steady else 'falling'})")
     else:
-        c.add("pricing", "D", 2, NA, "gross margin not reported")
+        c.add("pricing", "D", 2, SKIP if fin else NA, "gross margin not reported")
     roic_l = d["roic"][-1]
     cap_ok = [roic_l >= 0.10 if ok(roic_l) else None, sh_g <= 0.005 if sh_g is not None else None]
     if fin or all(x is None for x in cap_ok):
-        c.add("capAlloc", "D", 2, NA, "capital allocation proxy unavailable")
+        c.add("capAlloc", "D", 2, SKIP if fin else NA, "capital allocation proxy unavailable")
     else:
         hits = sum(bool(x) for x in cap_ok)
         c.add("capAlloc", "D", 2, FULL if hits == 2 else HALF if hits == 1 else ZERO,
@@ -327,8 +384,11 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
     cr = L("assetsCur") / L("liabCur") if ok(L("assetsCur"), L("liabCur")) and L("liabCur") > 0 else None
     c.tiers("liquidity", "E", 2, cr if not (nd is not None and nd <= 0) else 9.9, lambda v: v >= 1.5, lambda v: v >= 1.0,
             "net cash" if nd is not None and nd <= 0 else f"current ratio {mult(cr)}", na=fin)
-    c.add("concentration", "E", 2, NA, "needs filing text review (customer concentration)")
-    c.add("governance", "E", 1, NA, "needs filing text review (governance red flags)")
+    if fin:
+        cap_r = L("equity") / L("assets") if ok(L("equity"), L("assets")) and L("assets") > 0 else None
+        c.tiers("capital", "E", 3, cap_r, lambda v: v >= 0.10, lambda v: v >= 0.07, f"equity is {pct(cap_r)} of assets (capital cushion)")
+    c.add("concentration", "E", 2, SKIP, "needs filing text review (customer concentration)")
+    c.add("governance", "E", 1, SKIP, "needs filing text review (governance red flags)")
 
     # F. Market trend & sentiment (10)
     sma50, sma200, rsi_ = s.get("sma50"), s.get("sma200"), s.get("rsi14")
@@ -342,7 +402,7 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
     r6, r6_med = s.get("r6m"), sec.get("r6m")
     c.tiers("relStr", "F", 2, (r6, r6_med) if ok(r6, r6_med) else None, lambda v: v[0] > v[1], lambda v: False,
             f"6-month return {r6:+.1f}% vs sector median {r6_med:+.1f}%" if ok(r6, r6_med) else "relative strength n/a")
-    c.add("sentiment", "F", 2, NA, "needs analyst estimate revisions (paid data)")
+    c.add("sentiment", "F", 2, SKIP, "needs analyst estimate revisions (paid data)")
 
     # ----- roll-up -----
     cats = {k: c.category(k) for k in WEIGHTS}
@@ -364,21 +424,21 @@ def score_stock(s: dict, f: dict, pre: dict, peers: dict, today: date) -> dict:
 
     # ----- hard gates -----
     flags, warns = [], []
-    if ok(cov) and cov < 1.5 and not fin and (L("debt") or 0) > 0:
+    if ok(cov) and cov < 1.5 and not fin and nd is not None and nd > 0:
         flags.append(f"operating profit covers interest only {cov:.1f}×")
     if nd_e is not None and nd_e > 5 and not fin:
         flags.append(f"net debt is {nd_e:.1f}× EBITDA")
     r4 = [x for x in tail(d["rev"], 4) if ok(x)]
     if len(r4) == 4 and r4[0] > r4[1] > r4[2] > r4[3]:
         flags.append("revenue fell three years in a row")
-    if sh_g is not None and sh_g > 0.10:
+    rps_g, _ = growth_over([r / sh if ok(r, sh) and sh > 0 else None for r, sh in zip(d["rev"], d["shares"])])
+    # Issuing shares to buy a business that brings its own revenue isn't the same as diluting owners.
+    if sh_g is not None and sh_g > 0.10 and (rps_g is None or rps_g < 0):
         flags.append(f"share count growing {pct(sh_g, 0)} a year (heavy dilution)")
     f3all = tail(d["fcf"], 3)
     if not fin and len(f3all) == 3 and all(ok(x) and x < 0 for x in f3all):
         flags.append("negative free cash flow three years running")
     filed = f.get("filed")
-    if filed and (today - datetime.strptime(filed, "%Y-%m-%d").date()).days > STALE_DAYS:
-        flags.append(f"latest annual report is stale (filed {filed})")
     if ok(L("equity")) and L("equity") < 0:
         warns.append("negative shareholders' equity (often from buybacks, but check)")
 
@@ -418,7 +478,28 @@ def main() -> None:
     stocks = stocks_doc["stocks"]
     today = date.today()
 
-    pre = {s["symbol"]: first_pass(s, fund[s["symbol"]]) for s in stocks if s["symbol"] in fund}
+    # Which listings to score. Several symbols can share one SEC filer: share
+    # classes (GOOG/GOOGL) and also preferreds, notes and depositary shares that
+    # Nasdaq lists as stocks. Score the main listings (at least half the largest
+    # one's market cap) and value them all against the company's full market cap.
+    by_cik: dict[int, list] = {}
+    for s in stocks:
+        if s["symbol"] in fund:
+            by_cik.setdefault(fund[s["symbol"]].get("cik", s["symbol"]), []).append(s)
+    company: dict[str, dict] = {}
+    stale = 0
+    for members in by_cik.values():
+        cap = max(m.get("marketCap") or 0 for m in members)
+        filed = fund[members[0]["symbol"]].get("filed")
+        if filed and (today - datetime.strptime(filed, "%Y-%m-%d").date()).days > STALE_DAYS:
+            stale += len(members)  # no recent US-GAAP annual report (often foreign filers)
+            continue
+        for m in members:
+            if (m.get("marketCap") or 0) >= cap * 0.5:
+                company[m["symbol"]] = dict(m, marketCap=cap)
+    print(f"skipping {stale} listings with stale filings", file=sys.stderr)
+
+    pre = {sym: first_pass(s, fund[sym]) for sym, s in company.items()}
 
     # Sector medians and revenue ranks.
     peers: dict[str, dict] = {}
@@ -444,7 +525,7 @@ def main() -> None:
         if s["symbol"] not in pre:
             continue
         try:
-            s["lt"] = score_stock(s, fund[s["symbol"]], pre[s["symbol"]], peers, today)
+            s["lt"] = score_stock(company[s["symbol"]], fund[s["symbol"]], pre[s["symbol"]], peers, today)
             scored += s["lt"]["score"] is not None
         except Exception as exc:  # one malformed filing shouldn't sink the run
             print(f"score {s['symbol']} failed: {exc!r}", file=sys.stderr)

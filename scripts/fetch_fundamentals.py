@@ -74,6 +74,7 @@ INSTANTS = {
     "ltdebtNC": ["LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligationsNoncurrent"],
     "ltdebtC": ["LongTermDebtCurrent", "LongTermDebtAndCapitalLeaseObligationsCurrent"],
     "stdebt": ["ShortTermBorrowings", "CommercialPaper", "DebtCurrent"],
+    "assets": ["Assets"],
     "assetsCur": ["AssetsCurrent"],
     "liabCur": ["LiabilitiesCurrent"],
 }

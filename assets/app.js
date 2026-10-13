@@ -193,7 +193,8 @@
       const cheap = lt.mos >= 0;
       pricePara = `Adding up the cash it should make in future, it's worth about <b>$${fmtNum(fv[1], 2)}</b> a share ($${fmtNum(fv[0], 2)} if things go badly, $${fmtNum(fv[2], 2)} if great). ` +
         `Today's $${fmtNum(price, 2)} is ${cheap ? `<b>${fmtNum(lt.mos, 0)}% below</b>` : `<b>${fmtNum(-lt.mos, 0)}% above</b>`} that. ` +
-        (cheap ? "Paying less than it's worth gives you a cushion if you're wrong." : "The price already assumes a lot of good news.");
+        (cheap ? "Paying less than it's worth gives you a cushion if you're wrong." : "The price already assumes a lot of good news.") +
+        (lt.mos < -50 ? " This estimate is deliberately cautious (growth capped at 20% a year), so fast growers often look expensive on it." : "");
     } else {
       pricePara = "There isn't enough steady cash flow to estimate a fair value, so treat the price with extra caution.";
     }
