@@ -7,6 +7,24 @@ It's meant for research, not investment advice.
 - **Filter** by sector, market cap and ticker/name search. Sort the table by any column. Click a row to open the ticker on Yahoo Finance.
 - **Charts:** the top 20 for the chosen window, plus the median return by sector. Every row has a 1-year sparkline.
 
+## Top picks by the numbers (top of the page)
+
+Three lists of 10, for **1, 5 and 10 years**, built with one fixed set of rules for every stock: no opinions, news or manual overrides.
+
+1. **Safety gates.** No red flags, at least 70% of the model measurable, market cap ≥ $1B, price ≥ $5, at least $10M traded a day.
+2. **Horizon score.** The same six category results from the long-term model, reweighted per horizon. The longer the horizon, the more durability counts and the less the current trend does.
+
+   | Horizon | Weights | Extra condition |
+   |---|---|---|
+   | 1 year | 1-year score: quality 30, value 25, momentum 25, trend 10, risk 10 | above its 200-day average, not overheated, quality ≥ 60, momentum ≥ 50 |
+   | 5 years | quality 25, growth 25, value 25, moat 10, risk 10, trend 5 | quality ≥ 60, price no more than 25% above fair value |
+   | 10 years | quality 30, growth 25, moat 20, risk 15, value 10 | quality ≥ 70 |
+
+3. **Diversify.** Take the top 10 by score, at most 2 per sector and 1 per company. An **All 3** tag marks stocks on every list.
+4. **Rule for acting on it.** Equal amounts in each pick; re-check quarterly (1 year) or yearly (5 and 10 years); sell on a broken business (red flag) or, for the 1-year list, a close below the exit price.
+
+These are rankings from past data, not predictions, and haven't been backtested. Computed in the browser (`computePicks()` in `assets/app.js`).
+
 ## Long-term score (default view)
 
 Every stock with enough SEC filing data gets a 0–100 score from six categories, plus three plain-language answers: *Is it a good business? Is it a good price? Is now a good time?*

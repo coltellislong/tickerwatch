@@ -21,6 +21,15 @@
       Run <code>python scripts/fetch_data.py</code> or the “Update stock data” GitHub Action to load real market data.
     </div>
 
+    <section class="card picks" id="picks" aria-labelledby="picks-title">
+      <div class="table-head">
+        <h2 id="picks-title">Top picks by the numbers</h2>
+        <p class="hint" id="picks-sub">Same fixed rules for every stock, recalculated every weekday. No opinions, no headlines.</p>
+      </div>
+      <div class="picks-grid" id="picks-grid"></div>
+      <p class="hint picks-note">How a stock makes a list: no red flags, at least 70% of its data measurable, market cap ≥ $1B, price ≥ $5, ≥ $10M traded a day; then the 10 highest scores for that horizon, at most 2 per sector and 1 per company. Rankings from past data are not predictions and haven't been backtested. Not financial advice.</p>
+    </section>
+
     <section class="filters" aria-label="Filters">
       <label>Horizon
         <select id="f-horizon">
@@ -33,6 +42,8 @@
         <select id="f-metric">
           <option value="lts" selected>Long-term score</option>
           <option value="y1">1-year score</option>
+          <option value="y5">5-year score</option>
+          <option value="y10">10-year score</option>
           <option value="ltq">Business quality</option>
           <option value="ltv">Value at today's price</option>
           <option value="mos">Margin of safety</option>

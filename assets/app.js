@@ -4,6 +4,8 @@
   const METRICS = {
     lts: { label: "Long-term score", short: "LT score", pct: false },
     y1: { label: "1-year score", short: "1-yr score", pct: false },
+    y5: { label: "5-year score", short: "5-yr score", pct: false },
+    y10: { label: "10-year score", short: "10-yr score", pct: false },
     ltq: { label: "Business quality", short: "Quality", pct: false },
     ltv: { label: "Value at today's price", short: "Value", pct: false },
     mos: { label: "Margin of safety", short: "MoS", pct: true },
@@ -349,6 +351,109 @@
       ${hold ? `<p class="ex-k">How long to stay in</p><p>${hold}</p>` : ""}
       ${exit ? `<p class="ex-k">When to leave</p><p>${exit}</p>` : ""}
       <p class="ex-note">1-year score = quality 30% + value 25% + momentum 25% + trend 10% + risk 10%, from SEC filings and prices as of ${esc(state.data.asOf)}. A ranking, not a prediction; not backtested. Not financial advice. Click the row for charts and every metric.</p>`;
+  }
+
+  // ---------- top picks: 1, 5 and 10 years ----------
+  // Each horizon reweights the same six category results (see scripts/score.py):
+  // the longer the horizon, the more durability counts and the less today's
+  // price trend does. The 1-year list uses the 1-year score above.
+  const HORIZON_WEIGHTS = {
+    y5: { A: 25, B: 25, C: 25, D: 10, E: 10, F: 5 },
+    y10: { A: 30, B: 25, C: 10, D: 20, E: 15 },
+  };
+  function horizonScore(lt, weights) {
+    if (!lt || !lt.cats) return null;
+    let num = 0, den = 0, total = 0;
+    for (const [k, w] of Object.entries(weights)) {
+      total += w;
+      const c = lt.cats[k];
+      if (!c || !c[1]) continue;
+      num += (w * c[0]) / c[1];
+      den += w;
+    }
+    return den >= 0.7 * total ? Math.round((num / den) * 1000) / 10 : null;
+  }
+  // Hard gates every pick must pass, whatever its score.
+  const pickable = (s) => s.lt && s.lt.score != null && !s.lt.flags.length && s.lt.cov >= 70 &&
+    s.price >= 5 && (s.dollarVol == null || s.dollarVol >= 1e7) && s.marketCap >= 1e9 &&
+    s.lt.quality != null && s.lt.value != null && s.score != null;
+  const PICK_LISTS = [
+    { key: "y1", title: "1 year", sub: "quality 30 · value 25 · momentum 25 · trend 10 · risk 10",
+      extra: (s) => s.yr && s.yr.up200 && !s.yr.hot && s.lt.quality >= 60 && s.score >= 50,
+      rule: "Equal amounts in each. Re-check the list every quarter; sell any that close below their exit price (in Why? on the 1-year view)." },
+    { key: "y5", title: "5 years", sub: "quality 25 · growth 25 · value 25 · moat 10 · risk 10 · trend 5",
+      extra: (s) => s.lt.quality >= 60 && s.lt.mos != null && s.lt.mos > -25,
+      rule: "Equal amounts in each. Re-check once a year, after annual reports; replace any that pick up a red flag." },
+    { key: "y10", title: "10 years", sub: "quality 30 · growth 25 · moat 20 · risk 15 · value 10",
+      extra: (s) => s.lt.quality >= 70,
+      rule: "Equal amounts in each. Re-check once a year; sell only if the business breaks (a red flag), not because the price fell." },
+  ];
+  let picks = {};
+  function computePicks() {
+    const pool = state.data.stocks.filter(pickable);
+    picks = {};
+    for (const list of PICK_LISTS) {
+      const perSector = {}, companies = new Set(), out = [];
+      const ranked = pool.filter((s) => s[list.key] != null && list.extra(s)).sort((a, b) => b[list.key] - a[list.key]);
+      for (const s of ranked) {
+        const company = s.lt.cik || s.symbol;
+        if (companies.has(company) || (perSector[s.sector] || 0) >= 2) continue;
+        companies.add(company);
+        perSector[s.sector] = (perSector[s.sector] || 0) + 1;
+        out.push(s);
+        if (out.length === 10) break;
+      }
+      picks[list.key] = out;
+    }
+    const counts = {};
+    for (const l of Object.values(picks)) for (const s of l) counts[s.symbol] = (counts[s.symbol] || 0) + 1;
+    picks.inAll = new Set(Object.keys(counts).filter((k) => counts[k] === PICK_LISTS.length));
+    picks.pool = pool.length;
+  }
+  // Three short, factual reasons per pick, chosen to match the horizon.
+  function pickReasons(s, key) {
+    const f = s.lt.fin || {};
+    const last = (arr) => (arr || []).filter((v) => v != null).slice(-1)[0];
+    const revs = (f.rev || []).slice(-4).filter((v) => v != null && v > 0);
+    const revG = revs.length >= 3 ? (Math.pow(revs[revs.length - 1] / revs[0], 1 / (revs.length - 1)) - 1) * 100 : null;
+    const roic = last(f.roic);
+    const netCash = s.lt.m.some((m) => m[0] === "netDebt" && /net cash/.test(m[4]));
+    const bits = {
+      mom: s.r1y != null ? `${fmtPct(s.r1y)} past year` : null,
+      mos: s.lt.mos != null && s.lt.mos >= 5 ? `${fmtNum(s.lt.mos, 0)}% below fair value` : null,
+      roic: roic != null ? `${f.roicLabel || "ROIC"} ${fmtNum(roic, 0)}%` : null,
+      grow: revG != null ? `revenue ${revG >= 0 ? "+" : "−"}${fmtNum(Math.abs(revG), 0)}%/yr` : null,
+      cash: netCash ? "net cash" : null,
+    };
+    const order = { y1: ["mom", "mos", "roic", "grow"], y5: ["grow", "mos", "roic", "mom"], y10: ["roic", "grow", "cash", "mos"] }[key];
+    return order.map((k) => bits[k]).filter(Boolean).slice(0, 3);
+  }
+  function renderPicks() {
+    const grid = $("picks-grid");
+    if (!state.data.stocks.some((s) => s.lts != null)) {
+      $("picks").hidden = true;
+      return;
+    }
+    grid.innerHTML = PICK_LISTS.map((list) => {
+      const items = picks[list.key].map((s, i) => `
+        <li>
+          <button type="button" class="pick" data-sym="${esc(s.symbol)}">
+            <span class="pick-rank">${i + 1}</span>
+            <span class="pick-main">
+              <span class="pick-top"><b>${esc(s.symbol)}</b>${picks.inAll.has(s.symbol) ? `<span class="all3" title="On all three lists">All 3</span>` : ""}${P && P.held.has(s.symbol) ? `<span class="owned">Owned</span>` : ""}<span class="pick-name">${esc(s.name)}</span></span>
+              <span class="pick-why">${pickReasons(s, list.key).map(esc).join(" · ")}</span>
+            </span>
+            <span class="pick-score">${fmtNum(s[list.key], 0)}</span>
+          </button>
+        </li>`).join("");
+      return `<div class="picks-col">
+        <h3>${list.title}</h3>
+        <p class="hint">${list.sub}</p>
+        <ol>${items || `<li class="hint">No stock passes every gate today.</li>`}</ol>
+        <p class="pick-rule"><b>Rule:</b> ${esc(list.rule)}</p>
+      </div>`;
+    }).join("");
+    $("picks-sub").textContent = `Same fixed rules for every stock, recalculated every weekday from ${state.data.asOf} data. ${picks.pool.toLocaleString()} stocks passed the safety gates. Click a pick for its full report.`;
   }
 
   // The signal shown for a stock under the current horizon.
@@ -724,6 +829,8 @@
             <div><span>Quality</span><b>${fmtNum(lt.quality, 0)}</b></div>
             <div><span>Value</span><b>${fmtNum(lt.value, 0)}</b></div>
             <div><span>1-year score</span><b>${s.y1 == null ? "—" : fmtNum(s.y1, 0)}</b></div>
+            <div><span>5-year score</span><b>${s.y5 == null ? "—" : fmtNum(s.y5, 0)}</b></div>
+            <div><span>10-year score</span><b>${s.y10 == null ? "—" : fmtNum(s.y10, 0)}</b></div>
             <div><span>Portfolio fit</span><b>${s.fit == null ? "—" : fmtNum(s.fit, 0)}</b></div>
           </div>
           <div class="cats">${catBars(lt)}</div>
@@ -1015,6 +1122,7 @@
     renderCharts(rows);
     renderTable(rows);
     renderPortfolio();
+    renderPicks();
   }
 
   // ---------- wiring ----------
@@ -1127,6 +1235,11 @@
       if (tr && tr.dataset.sym && bySym.has(tr.dataset.sym)) openDetail(tr.dataset.sym);
     });
 
+    $("picks-grid").addEventListener("click", (e) => {
+      const b = e.target.closest(".pick");
+      if (b) openDetail(b.dataset.sym);
+    });
+
     // Detail view
     detail.addEventListener("click", (e) => {
       if (e.target === detail || e.target.closest(".d-close")) closeDetail();
@@ -1161,6 +1274,8 @@
       s.mos = lt.mos ?? null;
       s.yr = oneYear(s);
       s.y1 = s.yr ? s.yr.score : null;
+      s.y5 = horizonScore(s.lt, HORIZON_WEIGHTS.y5);
+      s.y10 = horizonScore(s.lt, HORIZON_WEIGHTS.y10);
     }
     if (!d.stocks.some((s) => s.lts != null)) {
       // No fundamentals yet: start on the momentum view.
@@ -1171,6 +1286,7 @@
     }
     loadPf();
     computePf();
+    computePicks();
     $("pf-syms").innerHTML = d.stocks.map((s) => `<option value="${esc(s.symbol)}">${esc(s.name)}</option>`).join("");
     syncSignalOptions();
     $("asof").textContent = `${d.count.toLocaleString()} US stocks with market cap ≥ ${fmtCap(d.minMarketCap)} · prices as of ${d.asOf} · updated ${new Date(d.generatedAt).toLocaleString()}`;
